@@ -137,6 +137,17 @@ void main() {
     }
     vViewDepth = depth;
 #endif
+#ifdef VOXEL
+    // the card moves along its ray to the nearest the cube can reach, so a surface through the cube's center (a wall
+    // the cloud was scanned from) can't slice the flat card into triangles
+    float reach = 0.8660254 * uSize;
+    if (projectionMatrix[2][3] == 0.0) {
+        mv.z += reach;
+    } else {
+        float near = projectionMatrix[3][2] / (projectionMatrix[2][2] - 1.0);
+        mv.xyz *= max(depth - reach, 1.001 * near) / depth;
+    }
+#endif
     gl_Position = projectionMatrix * mv;
     // a splat right in front of the camera would be a screen-filling blob (and the most expensive fragment work)
     gl_PointSize = clamp(px, uMinPx, uStyle == 3 ? 64.0 : 512.0);
