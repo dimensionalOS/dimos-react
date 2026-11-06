@@ -30,11 +30,13 @@ export const CUBE_SHADES = {
     outline: { id: 2, label: "Outlined", about: "flat color with thin dark edges" },
     bevel: { id: 3, label: "Beveled", about: "soft light with faces darkening toward their edges" },
     memworld: { id: 4, label: "Contrast", about: "strong per-face light" },
+    glass: { id: 5, label: "Glass", about: "see-through cubes with bright edges: a map you can see into" },
 }
 
 export type PointStyle = keyof typeof POINT_STYLES
 export type CubeShade = keyof typeof CUBE_SHADES
-export type ColorMode = "height" | "intensity" | "range" | "solid"
+/** "glass": colored by height on see-through cubes with bright edges (a map you can see into) */
+export type ColorMode = "height" | "intensity" | "range" | "solid" | "glass"
 
 export interface PointLook {
     style?: PointStyle
@@ -68,7 +70,7 @@ export const DEFAULT_LOOK: Required<Omit<PointLook, "period">> = {
     nearShrink: 0,
 }
 
-const COLOR: Record<ColorMode, number> = { height: 0, intensity: 1, range: 2, solid: 3 }
+const COLOR: Record<ColorMode, number> = { height: 0, intensity: 1, range: 2, solid: 3, glass: 0 }
 const VIEW_LIGHT = new THREE.Vector3(2, 4, 3).normalize()
 
 const vertexShader = /* glsl */ `
@@ -218,7 +220,14 @@ void main() {
     float rim = max(abs(face.x), abs(face.y));
     float ndl = dot(normal, uLightWorld);
     float light;
-    if (uCubeShade == 0) {
+    float alpha = 1.0;
+    if (uCubeShade == 5) {
+        // glass: faint faces (more opaque seen edge-on, as glass is), bright rims, drawn without depth (see applyLook)
+        float edge = smoothstep(0.88, 0.98, rim);
+        float grazing = 1.0 - abs(dot(normal, dir));
+        light = 0.9 + 0.2 * max(ndl, 0.0) + 0.45 * edge;
+        alpha = mix(0.08 + 0.22 * grazing * grazing, 0.6, edge);
+    } else if (uCubeShade == 0) {
         // wrap lighting: the face away from the light still keeps most of its color
         light = 0.66 + 0.36 * (0.5 + 0.5 * ndl) - 0.06 * smoothstep(0.9, 1.0, rim);
     } else if (uCubeShade == 1) {
@@ -233,7 +242,7 @@ void main() {
         // per-face light (MemWorld's cube faces): the view-space light turned into world space once per draw, on the CPU
         light = (0.42 + 0.72 * max(ndl, 0.0)) * (1.0 - 0.18 * smoothstep(0.86, 0.99, rim));
     }
-    gl_FragColor = vec4(vColor * light, uOpacity);
+    gl_FragColor = vec4(vColor * light, uOpacity * alpha);
 #endif
 }
 `
@@ -289,6 +298,12 @@ export function makePointMaterial(pixelsPerMeter: { value: number }): THREE.Shad
 export function applyLook(material: THREE.ShaderMaterial, partial: PointLook, range: [number, number]) {
     const look = { ...DEFAULT_LOOK, ...partial }
     const uniforms = material.uniforms
+    // glass is a look of its own: height colors on cubes shaded as glass, whatever the page's style and shading
+    const glassy = look.colorMode === "glass"
+    if (glassy) {
+        look.style = "voxel"
+        look.cubeShade = "glass"
+    }
     uniforms.uCubeShade.value = CUBE_SHADES[look.cubeShade]?.id ?? 0
     uniforms.uSize.value = Math.max(0.001, look.size)
     uniforms.uNearShrink.value = Math.max(0, look.nearShrink ?? 0)
@@ -321,12 +336,14 @@ export function applyLook(material: THREE.ShaderMaterial, partial: PointLook, ra
     uniforms.uSolid.value.setStyle(look.solid, THREE.NoColorSpace)
     uniforms.uOpacity.value = look.opacity
     uniforms.uGradient.value = gradientTexture(look.gradient)
-    uniforms.uPeriod.value = look.colorMode === "height" && isPalette(look.gradient)
+    uniforms.uPeriod.value = (look.colorMode === "height" || glassy) && isPalette(look.gradient)
         ? Math.max(0.05, look.period ?? DEFAULT_PERIOD)
         : 0
     const splat = look.style === "splat"
-    material.transparent = splat || look.opacity < 1
-    material.depthWrite = !splat && look.opacity >= 1
+    // glass cubes blend over each other and what's behind them: no depth written, so the far ones show through
+    const glass = look.style === "voxel" && look.cubeShade === "glass"
+    material.transparent = splat || glass || look.opacity < 1
+    material.depthWrite = !splat && !glass && look.opacity >= 1
     material.blending = splat ? THREE.CustomBlending : THREE.NormalBlending
     material.blendSrc = THREE.OneFactor
     material.blendDst = THREE.OneMinusSrcAlphaFactor

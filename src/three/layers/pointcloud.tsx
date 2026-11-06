@@ -81,6 +81,9 @@ export const CLOUD_DEFAULTS: CloudSettings = {
     maxPoints: 2_000_000,
 }
 
+/** dimos's /global_map (any namespace): drawn in glass by default */
+export const isGlobalMap = (topic: Topic | null | undefined): boolean => /(^|\/)global_map$/.test(topic?.name ?? "")
+
 /** A map-like cloud by name (drawn with bigger points). */
 export const isMapTopic = (topic: Topic | null | undefined): boolean =>
     /map|global|voxel|terrain|costmap/i.test(topic?.name ?? "")
@@ -625,7 +628,15 @@ registerLayer<CloudSettings>({
     // a map's points at its 10 cm voxel size
     defaults: (topic) =>
         isMapTopic(topic)
-            ? { ...CLOUD_DEFAULTS, look: { ...CLOUD_DEFAULTS.look, size: 0.1 } }
+            // the global map in glass, so what's inside it (the robot, the paths, the locations) shows through
+            ? {
+                ...CLOUD_DEFAULTS,
+                look: {
+                    ...CLOUD_DEFAULTS.look,
+                    size: 0.1,
+                    ...(isGlobalMap(topic) ? { colorMode: "glass" as const } : {}),
+                },
+            }
             : structuredClone(CLOUD_DEFAULTS),
     create: (context, topic, settings) => new CloudLayer(context, topic, settings),
     Settings: CloudSettingsEditor,
