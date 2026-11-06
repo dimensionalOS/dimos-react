@@ -1,7 +1,7 @@
 {
     "name": "@robotics/dimos-react",
     "version": "0.3.14",
-    "license": "MIT",
+    "license": "Apache-2.0",
     "nodeModulesDir": "auto",
     "exports": {
         ".": "./src/index.ts",
