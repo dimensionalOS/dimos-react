@@ -4,33 +4,45 @@ React UI toolkit for [dimOS Desktop](https://github.com/dimensionalOS/dimos-desk
 Desktop's skin live, URL state the backend can drive, zenoh data hooks, and a generic three.js 3D view (TF, point
 clouds, paths, poses, robot models).
 
-TypeScript + TSX. No-build pages import the source straight from a GitHub tag through esm.sh (it compiles the .ts/.tsx);
-bundlers can use the Vite build (`dist/`, with `.d.ts` types). React, react-dom and three are peer dependencies — never
-bundled — so the library and your app share one copy.
+TypeScript + TSX, used as source: an app's deno.json maps `dimos-react` to the source at a GitHub tag
+(raw.githubusercontent.com) and its Vite build compiles it into the page, with no CDN in between. React, react-dom and
+three are peer dependencies — never bundled into the library — so the library and your app share one copy.
 
 ## Quick start
 
-```html
-<script type="importmap">
-    {
-        "imports": {
-            "react": "https://esm.sh/react@19.2.0",
-            "react/": "https://esm.sh/react@19.2.0/",
-            "react-dom": "https://esm.sh/react-dom@19.2.0",
-            "react-dom/": "https://esm.sh/react-dom@19.2.0/",
-            "three": "https://esm.sh/three@0.180.0",
-            "three/": "https://esm.sh/three@0.180.0/",
-            "dimos-react": "https://esm.sh/gh/dimensionalOS/dimos-react@v0.2.0/src/index.ts?external=react,react-dom,three",
-            "dimos-react/three": "https://esm.sh/gh/dimensionalOS/dimos-react@v0.2.0/src/three.ts?external=react,react-dom,three"
-        }
+```jsonc
+// deno.json (the app's frontend)
+{
+    "imports": {
+        "react": "npm:react@^19.2.0",
+        "react/": "npm:/react@^19.2.0/",
+        "react-dom": "npm:react-dom@^19.2.0",
+        "react-dom/": "npm:/react-dom@^19.2.0/",
+        "three": "npm:three@^0.180.0",
+        "three/": "npm:/three@^0.180.0/",
+        "dimos-react": "https://raw.githubusercontent.com/dimensionalOS/dimos-react/v0.3.14/src/index.ts",
+        "dimos-react/three": "https://raw.githubusercontent.com/dimensionalOS/dimos-react/v0.3.14/src/three.ts"
     }
-</script>
-<div id="root"></div>
-<script type="module" src="./main.js"></script>
+}
+```
+
+Deno (`deno check`, `deno test`) reads those URLs as they are. For the page, Vite needs a plugin that fetches them and
+compiles them with the rest of the app: [dim-controller](https://github.com/dimensionalOS/dim-controller)'s
+`frontend/tools/esm_fetch.ts` (copy it in; `ESM_OFFLINE=1` builds from its prefetched cache, as a nix build does):
+
+```ts
+// vite.config.ts
+import react from "@vitejs/plugin-react"
+import { defineConfig } from "vite"
+import { esmFetch } from "./tools/esm_fetch.ts"
+import deno from "./deno.json" with { type: "json" }
+
+const dimosReact = Object.fromEntries(Object.entries(deno.imports).filter(([name]) => name.startsWith("dimos-react")))
+export default defineConfig({ base: "./", plugins: [esmFetch(dimosReact), react()] })
 ```
 
 ```tsx
-// main.tsx (a Vite / TSX app; a no-build page writes the same with React's createElement)
+// main.tsx
 import { createRoot } from "react-dom/client"
 import { AppProvider, Button, Card, Toggle, TopBar, useToast, useUrlState } from "dimos-react"
 
@@ -432,12 +444,11 @@ against `/gateways/desktop/comments`, quietly empty on a Desktop without them), 
 
 ## Installing
 
-- **No build (import map / esm.sh)** — the main path, as in the quick start:
-  `https://esm.sh/gh/dimensionalOS/dimos-react@vX.Y.Z/src/index.ts` and `.../src/three.ts`, with
-  `?external=react,react-dom,three` so your page's React and three are used. esm.sh compiles the TypeScript / TSX from
-  the tag (types stripped, JSX through `react/jsx-runtime`, which the `react/` import-map entry covers). The source
-  stays importable this way: every relative import names its file with its extension, and nothing relies on a bundler
-  (`test/imports.test.ts` checks both).
+- **Source at a tag (the main path)**, as in the quick start: deno.json maps `dimos-react` and `dimos-react/three` to
+  `https://raw.githubusercontent.com/dimensionalOS/dimos-react/vX.Y.Z/src/index.ts` and `.../src/three.ts`, and the
+  page's Vite build compiles them (dim-controller's `esm_fetch.ts` plugin), resolving their `react`, `react-dom` and
+  `three` to the app's own. The source stays importable this way: every relative import names its file with its
+  extension, and nothing relies on a bundler (`test/imports.test.ts` checks both).
 - **Deno / vendored source**: Deno runs and type-checks the `.ts`/`.tsx` source as-is (copy `src/` in, map `react`,
   `react-dom` and `three` in your import map; `deno check` wants `@types/react` and `@types/three` for the types).
 - **JSR (Deno, or Vite / npm through JSR's npm mirror)**: `deno add jsr:@robotics/dimos-react`, or
@@ -456,7 +467,7 @@ deno task build:demo  # dist-demo/index.html, the demo as one self-contained fil
 ```
 
 **Releasing**: bump `version` in deno.json, commit, `git tag vX.Y.Z`, push the tag, `deno publish --allow-slow-types`.
-esm.sh compiles the tagged source; nothing is built into git.
+Apps compile the tagged source; nothing is built into git.
 
 ## Layout
 

@@ -1,8 +1,8 @@
-// dimos-react: React UI toolkit for dimOS Desktop apps. Plain JS (no build step); React's createElement is `h`.
+// dimos-react: React UI toolkit for dimOS Desktop apps (TypeScript source; an app compiles it from a tag).
 //
-//     import { h, AppProvider, Button, useUrlState } from "https://esm.sh/gh/dimensionalOS/dimos-react@v0.1.0/mod.js?external=react,react-dom,three"
+//     import { AppProvider, Button, useUrlState } from "dimos-react" // deno.json: https://raw.githubusercontent.com/dimensionalOS/dimos-react/<tag>/src/index.ts
 //
-// The 3D view (three.js) is its own entry, ./three.js, so apps without a 3D view never load three.
+// The 3D view (three.js) is its own entry, ./three.ts, so apps without a 3D view never load three.
 export { cx } from "./cx.ts"
 export * from "./theme/theme.ts"
 export * from "./theme/provider.tsx"

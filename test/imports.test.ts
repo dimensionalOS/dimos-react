@@ -1,4 +1,4 @@
-// The source is importable as-is (esm.sh compiles it from a tag, Deno runs it): every relative import names its file,
+// The source is importable as-is (apps compile it from a tag, Deno runs it): every relative import names its file,
 // extension included, and nothing leans on a bundler (no path aliases, import.meta.glob, ?raw or CSS imports).
 import fs from "node:fs"
 import path from "node:path"
