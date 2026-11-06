@@ -1,6 +1,6 @@
 {
     "name": "@robotics/dimos-react",
-    "version": "0.3.13",
+    "version": "0.3.14",
     "license": "MIT",
     "nodeModulesDir": "auto",
     "exports": {
