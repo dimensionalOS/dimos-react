@@ -1,5 +1,6 @@
 // Labeled points: visualization_msgs.EntityMarkers (dimos's people/objects/places, JSON after a u32 length, no
-// fingerprint) and geometry_msgs.PointStamped (a clicked point, a goal). A sphere and a text label each, colored by
+// fingerprint), geometry_msgs.PointStamped (a clicked point, a goal) and visualization_msgs.InteractiveMarkerUpdate
+// (dimos's named locations: the whole list, each pose a place by its name). A sphere and a text label each, colored by
 // kind from the theme (--entity-person / --entity-object / --entity-location, else --danger / --ok / --info).
 import * as THREE from "three"
 import { LabelPool } from "../labels.ts"
@@ -52,6 +53,28 @@ export function entitiesOf(bytes: Uint8Array): LabeledPoint[] {
 }
 
 const sphere = new THREE.SphereGeometry(1, 16, 12)
+
+/** A decoded visualization_msgs.InteractiveMarkerUpdate (the fields the layer reads): dimos's named locations. */
+interface MarkerUpdateMessage {
+    poses?: {
+        header?: { frame_id?: string }
+        pose?: { position?: { x?: number; y?: number; z?: number } }
+        name?: string
+    }[]
+}
+
+/** Named locations → points (and the frame they're in: the list keeps every location in one, its first pose's). */
+export function namedLocationsOf(message: MarkerUpdateMessage): { points: LabeledPoint[]; frame: string } {
+    const poses = message.poses ?? []
+    return {
+        frame: poses[0]?.header?.frame_id ?? "",
+        points: poses.map(({ pose, name }) => ({
+            label: String(name ?? ""),
+            color: ENTITY_COLORS.location,
+            position: new THREE.Vector3(pose?.position?.x ?? 0, pose?.position?.y ?? 0, pose?.position?.z ?? 0),
+        })),
+    }
+}
 
 /** A decoded geometry_msgs.PointStamped (the fields the layer reads). */
 interface PointStampedMessage {
@@ -122,6 +145,17 @@ export class LabeledPoints {
                     context.setStatus({ problem: `cannot decode: ${(error as Error | undefined)?.message ?? error}` })
                 }
             })
+        } else if (topic.type === "visualization_msgs.InteractiveMarkerUpdate") {
+            // the whole list each time (it comes on a change, or when asked): reliable, so no list is skipped
+            this.#stop = subscribeDecoded(
+                context,
+                topic,
+                { reliable: true },
+                (message: MarkerUpdateMessage, timestamp: number | undefined) => {
+                    const { points, frame } = namedLocationsOf(message)
+                    show(points, frame, timestamp)
+                },
+            )
         } else {
             this.#stop = subscribeDecoded(
                 context,
@@ -194,7 +228,11 @@ export class LabeledPoints {
 registerLayer({
     id: "labeled-points",
     label: "Labeled points",
-    types: ["visualization_msgs.EntityMarkers", "geometry_msgs.PointStamped"],
+    types: [
+        "visualization_msgs.EntityMarkers",
+        "geometry_msgs.PointStamped",
+        "visualization_msgs.InteractiveMarkerUpdate",
+    ],
     defaults: {},
     create: (context, topic) => new LabeledPoints(context, topic),
 })

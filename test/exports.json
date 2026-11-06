@@ -408,6 +408,7 @@
         "mapZoomAt",
         "meshGeometry",
         "meshUris",
+        "namedLocationsOf",
         "overlayCandidates",
         "overlayTypeFor",
         "parseUrdf",
