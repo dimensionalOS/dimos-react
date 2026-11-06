@@ -42,7 +42,7 @@ for (const file of files) {
     Deno.mkdirSync(target.replace(/\/[^/]+$/, ""), { recursive: true })
     Deno.writeFileSync(target, out)
 }
-Deno.writeTextFileSync("src/vendor/dim-app/VERSION", `jeff-hykin/dim-app ${tag}\n`)
+Deno.writeTextFileSync("src/vendor/dim-app/VERSION", `dimensionalOS/ddtk ${tag}\n`)
 // the gateway client's types: declarations emitted from its TypeScript source at the vendored commit (zenoh-gateway's
 // client/zenoh_gateway.ts), so apps type-check against the same client they run
 const gateway = Deno.env.get("ZENOH_GATEWAY") ?? `${home}/repos/zenoh-gateway`

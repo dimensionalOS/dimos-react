@@ -47,7 +47,7 @@ const TOPICS: DemoTopic[] = [
 ]
 
 const MARKDOWN = `## Markdown
-Docs from a manifest or an OpenAPI document: **bold**, *italic*, \`code\` and [links](https://github.com/jeff-hykin/dimos-react).
+Docs from a manifest or an OpenAPI document: **bold**, *italic*, \`code\` and [links](https://github.com/dimensionalOS/dimos-react).
 
 - one
 - two, with \`code\`

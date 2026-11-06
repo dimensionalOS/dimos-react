@@ -20,8 +20,8 @@ bundled — so the library and your app share one copy.
             "react-dom/": "https://esm.sh/react-dom@19.2.0/",
             "three": "https://esm.sh/three@0.180.0",
             "three/": "https://esm.sh/three@0.180.0/",
-            "dimos-react": "https://esm.sh/gh/jeff-hykin/dimos-react@v0.2.0/src/index.ts?external=react,react-dom,three",
-            "dimos-react/three": "https://esm.sh/gh/jeff-hykin/dimos-react@v0.2.0/src/three.ts?external=react,react-dom,three"
+            "dimos-react": "https://esm.sh/gh/dimensionalOS/dimos-react@v0.2.0/src/index.ts?external=react,react-dom,three",
+            "dimos-react/three": "https://esm.sh/gh/dimensionalOS/dimos-react@v0.2.0/src/three.ts?external=react,react-dom,three"
         }
     }
 </script>
@@ -433,7 +433,7 @@ against `/gateways/desktop/comments`, quietly empty on a Desktop without them), 
 ## Installing
 
 - **No build (import map / esm.sh)** — the main path, as in the quick start:
-  `https://esm.sh/gh/jeff-hykin/dimos-react@vX.Y.Z/src/index.ts` and `.../src/three.ts`, with
+  `https://esm.sh/gh/dimensionalOS/dimos-react@vX.Y.Z/src/index.ts` and `.../src/three.ts`, with
   `?external=react,react-dom,three` so your page's React and three are used. esm.sh compiles the TypeScript / TSX from
   the tag (types stripped, JSX through `react/jsx-runtime`, which the `react/` import-map entry covers). The source
   stays importable this way: every relative import names its file with its extension, and nothing relies on a bundler
