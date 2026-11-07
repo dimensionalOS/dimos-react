@@ -4,7 +4,7 @@
 import { test } from "vitest"
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "./assert.ts"
 import { readFileSync } from "node:fs"
-import { parsePrims, parseUsda, usdaMeshUris } from "../src/three/urdf/usda.ts"
+import { parsePrims, parseUsda, usdaAssetHashes, usdaMeshUris } from "../src/three/urdf/usda.ts"
 import { parseUrdf } from "../src/three/urdf/parse.ts"
 import { Window } from "happy-dom"
 ;(globalThis as { DOMParser?: unknown }).DOMParser = new Window().DOMParser
@@ -131,4 +131,22 @@ test("a layer with no robot in it reads as a description with no links", () => {
     assertEquals(description.links, [])
     assertEquals(description.joints, [])
     assertEquals(description.name, "empty")
+})
+
+test("every hashed asset comes back under the path the layer authored", () => {
+    // dimos refuses to serve a subtree whose assets are unhashed, so for its layers this is
+    // complete — which is what lets a page cache a mesh by content and never refetch it.
+    const hashes = usdaAssetHashes(usda)
+
+    const mesh = parseUsda(usda).links.find((link) => link.name === "upper-arm")?.visuals[0]?.mesh
+    assert(mesh, "no mesh in the fixture")
+    const hash = hashes.get(mesh)
+    assert(hash, `no hash for ${mesh}; have ${[...hashes.keys()].join(", ")}`)
+    assert(hash.startsWith("sha256:"), hash)
+    assertEquals(hash.length, "sha256:".length + 64)
+})
+
+test("a layer that hashes nothing is empty rather than an error", () => {
+    const bare = '#usda 1.0\n(\n    defaultPrim = "x"\n)\n\ndef Xform "x"\n{\n}\n'
+    assertEquals(usdaAssetHashes(bare).size, 0)
 })

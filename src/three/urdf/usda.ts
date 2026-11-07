@@ -91,6 +91,38 @@ export function usdaMeshUris(text: string): string[] {
     return [...new Set(uris)]
 }
 
+/**
+ * Every asset the layer gives a content hash for: the path exactly as authored, to the hash verbatim.
+ *
+ * dimos writes a sha256 into each mesh's standard `assetInfo` and refuses to serve a subtree whose assets are
+ * unhashed, so for a dimos layer this is complete. A layer from elsewhere may hash nothing, and then it is empty
+ * rather than an error — the caller simply does not cache those.
+ *
+ * The value is returned as written (`"sha256:<hex>"`), not parsed, so a layer using another algorithm still says
+ * something a caller can compare for equality.
+ */
+export function usdaAssetHashes(text: string): Map<string, string> {
+    const hashes = new Map<string, string>()
+    walk(parsePrims(text), (prim) => {
+        const path = referenceOf(prim) ?? assetInfoPath(prim)
+        const version = assetInfoVersion(prim)
+        if (path && version) hashes.set(path, version)
+    })
+    return hashes
+}
+
+/** `assetInfo = { asset identifier = @...@ ... }` — the file the hash is of, when there is no reference arc. */
+function assetInfoPath(prim: Prim): string | null {
+    const match = (prim.meta["assetInfo"] ?? "").match(/\bidentifier\s*=\s*@([^@]+)@/)
+    return match ? match[1] : null
+}
+
+/** `assetInfo = { ... string version = "sha256:..." }`, as written. */
+function assetInfoVersion(prim: Prim): string | null {
+    const match = (prim.meta["assetInfo"] ?? "").match(/\bversion\s*=\s*"([^"]*)"/)
+    return match && match[1] ? match[1] : null
+}
+
 // ---- the layer as prims ----------------------------------------------------
 
 /**
