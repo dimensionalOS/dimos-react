@@ -145,6 +145,8 @@ export type {
     RobotDescription,
 } from "./three/urdf/description.ts"
 export { decodeMeshFile, meshGeometry, meshUris, parseUrdf } from "./three/urdf/parse.ts"
+export { isUsda, parsePrims, parseUsda, usdaMeshUris } from "./three/urdf/usda.ts"
+export type { Prim } from "./three/urdf/usda.ts"
 export { solveIk } from "./three/urdf/ik.ts"
 export type { IkResult } from "./three/urdf/ik.ts"
 export {
