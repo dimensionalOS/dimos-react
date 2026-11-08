@@ -50,6 +50,9 @@ export interface DescriptionLight {
     color: [number, number, number]
     intensity: number
     shadow: boolean
+    /** the lamp's own size, in metres. A light with a face rather than a point throws a penumbra, and
+     * how wide it is comes from this; USD says it on every area light (`inputs:radius`). */
+    radius?: number
 }
 
 /**

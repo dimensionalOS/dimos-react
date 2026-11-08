@@ -896,6 +896,9 @@ function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): Des
     // A light shines down its own -Z; where that points once the transforms above it are applied is its direction.
     const direction = rotate(world.quat, [0, 0, -1])
     const shadow = unquote(prim.attrs["inputs:shadow:enable"] ?? prim.attrs["shadow:enable"] ?? "1")
+    // USD's area lights state their own size, and a lamp with a size throws a soft edge rather than a
+    // hard one. The exporter writes it on every fitting, so the softness does not have to be guessed.
+    const size = Number(unquote(prim.attrs["inputs:radius"] ?? prim.attrs["radius"] ?? ""))
     return {
         name: frameName(prim),
         type,
@@ -904,6 +907,7 @@ function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): Des
         color: colour.length >= 3 ? [colour[0], colour[1], colour[2]] : [1, 1, 1],
         intensity,
         shadow: shadow !== "0" && shadow !== "false",
+        radius: Number.isFinite(size) && size > 0 ? size : undefined,
     }
 }
 

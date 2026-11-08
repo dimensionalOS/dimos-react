@@ -52,7 +52,7 @@ export function aimShadow(light: THREE.DirectionalLight, box: THREE.Box3) {
 export const MAX_SHADOW_LAMPS = 6
 
 /** A lamp inside the room: a near shadow, cheap enough that a handful can afford one. */
-export function lampCastsShadow(light: THREE.PointLight, reach: number) {
+export function lampCastsShadow(light: THREE.PointLight, reach: number, size = 0) {
     light.castShadow = true
     // 1024 was tried for the banding below and is not worth it: four lamps of cube map at that size
     // is a hundred megabytes of shadow texture, and asking for it cost the standard-material shader
@@ -64,6 +64,11 @@ export function lampCastsShadow(light: THREE.PointLight, reach: number) {
     // directional bias would be, and generously, because banding on a desk top is far more obvious
     // than a shadow sitting a centimetre off the thing that casts it
     light.shadow.normalBias = Math.max(0.05, reach * 0.012)
+    // A lamp with a face throws a penumbra; a mathematical point throws a hard edge, which is the
+    // single most renderer-looking thing about a rasterised room. USD states the size, so the blur
+    // follows it rather than being picked: a wider fitting, a softer edge. PCF counts the radius in
+    // shadow-map texels, so it scales with the map.
+    light.shadow.radius = size > 0 ? Math.min(12, Math.max(2, size * 60)) : 3
     const camera = light.shadow.camera
     camera.near = 0.15
     camera.far = reach

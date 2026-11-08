@@ -425,6 +425,7 @@ export class Viewer {
             } else {
                 made.position.set(...light.xyz)
                 if (made instanceof THREE.PointLight && light.shadow && lamps.includes(light)) {
+                    made.userData.lampRadius = light.radius ?? 0
                     this.#shadowLamps.push(made)
                 }
             }
@@ -470,7 +471,7 @@ export class Viewer {
             }
             if (wanted) {
                 // it only has to reach the floor and the furniture under it, not the room
-                lampCastsShadow(lamp, Math.max(4, lamp.position.z * 1.6))
+                lampCastsShadow(lamp, Math.max(4, lamp.position.z * 1.6), lamp.userData.lampRadius ?? 0)
             } else {
                 lamp.castShadow = false
                 lamp.shadow.map?.dispose()
