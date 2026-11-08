@@ -228,3 +228,58 @@ test("a prim placed with translate is not left at the origin", () => {
     assertAlmostEquals(by.get("stand_left")!.origin.xyz[1], 1.2, 1e-9)
     assertAlmostEquals(by.get("stand_right")!.origin.xyz[1], -1.2, 1e-9)
 })
+
+// ---- colour comes from the bound material, not only displayColor ----------
+// The converter writes a real UsdShade Material per MJCF material and binds it per geom, so a
+// G1's ten black parts and its silver ones are stated there and nowhere else.
+const _MATERIALS = `#usda 1.0
+(
+    defaultPrim = "rig"
+)
+
+def Xform "rig" (
+    prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+)
+{
+    def Scope "Materials"
+    {
+        def Material "black"
+        {
+            color3f inputs:color = (0.0331, 0.0331, 0.0331)
+        }
+    }
+
+    def Mesh "visual_0" (
+        assetInfo = {
+            asset identifier = @meshes/arm.STL@
+        }
+    )
+    {
+        rel material:binding = </rig/Materials/black>
+    }
+
+    def Mesh "visual_1" (
+        assetInfo = {
+            asset identifier = @meshes/hand.STL@
+        }
+    )
+    {
+        color3f[] primvars:displayColor = [(1, 0, 0)]
+        rel material:binding = </rig/Materials/black>
+    }
+}
+`
+
+test("a geom takes the colour of the material it binds", () => {
+    // Reading only displayColor drew the whole robot in the viewer's default grey.
+    const [visual] = parseUsda(_MATERIALS).links[0].visuals
+    assertAlmostEquals(visual.color![0], 0.0331, 1e-6)
+    assertAlmostEquals(visual.color![2], 0.0331, 1e-6)
+    assertEquals(visual.color![3], 1)
+})
+
+test("displayColor still wins over the bound material", () => {
+    // A geom that states its own colour means it; the binding is the fallback.
+    const visuals = parseUsda(_MATERIALS).links[0].visuals
+    assertEquals(visuals[1].color, [1, 0, 0, 1])
+})

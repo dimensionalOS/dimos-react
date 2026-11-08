@@ -55,6 +55,7 @@ export function parseUsda(text: string): RobotDescription {
         throw new Error("not a USD layer: no #usda header")
     }
     const roots = parsePrims(text)
+    indexMaterials(roots)
     const links: DescriptionLink[] = []
     const prims: Prim[] = []
     walk(roots, (prim) => {
@@ -487,6 +488,41 @@ function quatFromRows(m: number[]): [number, number, number, number] {
 }
 
 /**
+ * Every Material prim in the layer being parsed, by its path, so a geom can find what it binds.
+ *
+ * Module-level because a geom names its material by absolute path and may sit anywhere in the
+ * tree, so the lookup cannot be threaded down from the walk without passing a map through every
+ * geometry helper. parseUsda refills it before each parse.
+ */
+const materials = new Map<string, [number, number, number, number]>()
+
+function indexMaterials(roots: Prim[]): void {
+    materials.clear()
+    walk(roots, (prim) => {
+        if (prim.type !== "Material") return
+        const color = numbers(prim.attrs["inputs:color"])
+        if (color.length >= 3) materials.set(pathOf(prim), [color[0], color[1], color[2], 1])
+    })
+}
+
+/**
+ * The colour a geometry prim should be drawn in.
+ *
+ * `primvars:displayColor` first, which is what a geom with no material carries. Then the bound
+ * material's own `inputs:color`: the converter writes a real UsdShade Material per MJCF
+ * material and binds it, so a G1's ten black parts and its silver ones are stated there and
+ * nowhere else. Reading only displayColor drew the whole robot in the default grey, and the
+ * only displayColors in a converted layer are the green collision shapes and red sites.
+ */
+function colorOf(prim: Prim): Partial<DescriptionGeometry> {
+    const shown = numbers(prim.attrs["primvars:displayColor"])
+    if (shown.length >= 3) return { color: [shown[0], shown[1], shown[2], 1] }
+    const bound = (prim.attrs["material:binding"] ?? "").match(/<([^>]+)>/)
+    const color = bound ? materials.get(bound[1]) : undefined
+    return color ? { color } : {}
+}
+
+/**
  * The mesh file a geometry prim names, as the thing that can actually be fetched and drawn.
  *
  * `assetInfo` first, deliberately. dimos names the servable file there -- an STL or a DAE -- and
@@ -524,8 +560,7 @@ function geometriesOf(prim: Prim, collision: boolean): DescriptionGeometry[] {
 function geometryOf(prim: Prim): DescriptionGeometry | null {
     const origin = placementOf(prim)
     const scale = numbers(prim.attrs["xformOp:scale"])
-    const color = numbers(prim.attrs["primvars:displayColor"])
-    const tint: Partial<DescriptionGeometry> = color.length >= 3 ? { color: [color[0], color[1], color[2], 1] } : {}
+    const tint = colorOf(prim)
     const mesh = meshPathOf(prim)
     if (prim.type === "Mesh" || mesh) {
         if (!mesh) return null
