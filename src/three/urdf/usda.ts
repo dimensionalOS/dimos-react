@@ -11,7 +11,15 @@
 // and that XML contains braces, so a brace-counting reader walks straight off the end of the tree.
 //
 // Only text layers (.usda). A crate .usdc is binary and never travels over the file bus.
-import type { DescriptionGeometry, DescriptionJoint, DescriptionLink, Origin, RobotDescription } from "./description.ts"
+import type {
+    DescriptionGeometry,
+    DescriptionJoint,
+    DescriptionLight,
+    DescriptionLink,
+    Origin,
+    RobotDescription,
+    V3,
+} from "./description.ts"
 
 /** One prim: its type, its name, what it says about itself, and what is inside it. */
 export interface Prim {
@@ -58,17 +66,25 @@ export function parseUsda(text: string): RobotDescription {
     indexMaterials(roots)
     const links: DescriptionLink[] = []
     const prims: Prim[] = []
+    const sceneRoot = rootFrame(roots, defaultPrimName(text))
     walk(roots, (prim) => {
-        if (isLink(prim)) {
+        if (isLink(prim) || prim === sceneRoot) {
             prims.push(prim)
+            const collisions = geometriesOf(prim, true)
+            const visuals = geometriesOf(prim, false)
             links.push({
                 name: frameName(prim),
-                visuals: geometriesOf(prim, false),
-                collisions: geometriesOf(prim, true),
+                // A URDF draws one shape and collides another, so a link with both shows the visual and keeps the
+                // collider to itself. MuJoCo usually collides the very shape it draws: a wall is a collider and
+                // nothing else, and taking that to mean "do not draw" lost every wall, floor and slab of a
+                // converted room while leaving the furniture, which happens to carry separate visual meshes. With
+                // nothing else to show for a link, the collider is what the thing looks like.
+                visuals: visuals.length > 0 ? visuals : collisions,
+                collisions,
             })
         }
     })
-    const joints = jointsOf(roots, prims)
+    const joints = jointsOf(roots, prims, sceneRoot)
     const childLinks = new Set(joints.map((joint) => joint.child))
     const root = links.find((link) => !childLinks.has(link.name))?.name ?? links[0]?.name ?? ""
     return {
@@ -79,6 +95,7 @@ export function parseUsda(text: string): RobotDescription {
         joint_names: joints.filter((joint) => joint.type !== "fixed" && !joint.mimic).map((joint) => joint.name),
         links,
         joints,
+        lights: lightsOf(roots),
     }
 }
 
@@ -593,7 +610,7 @@ function geometryOf(prim: Prim): DescriptionGeometry | null {
 }
 
 /** Every joint: the ones authored as UsdPhysics prims, plus the welds and free joints nesting implies. */
-function jointsOf(roots: Prim[], links: Prim[]): DescriptionJoint[] {
+function jointsOf(roots: Prim[], links: Prim[], sceneRoot: Prim | null): DescriptionJoint[] {
     const byPath = new Map<string, Prim>()
     walk(roots, (prim) => byPath.set(pathOf(prim), prim))
     const joints: DescriptionJoint[] = []
@@ -604,10 +621,14 @@ function jointsOf(roots: Prim[], links: Prim[]): DescriptionJoint[] {
         if (joint) joints.push(joint)
     })
     const claimed = new Set(joints.map((joint) => joint.child))
+    // A link that something hangs off is the root of an articulated thing, and a robot's root is placed by tf.
+    // Welding it to the room as well would give it two parents, which tf does not allow: its pose then flips
+    // between the weld and whatever tf says, which is a robot whose body and pelvis come apart.
+    const articulated = new Set(joints.map((joint) => joint.parent))
     for (const prim of links) {
         const name = frameName(prim)
-        if (claimed.has(name)) continue
-        const ancestor = linkAncestor(prim)
+        if (claimed.has(name) || articulated.has(name)) continue
+        const ancestor = linkAncestor(prim, sceneRoot)
         if (!ancestor) continue
         joints.push(impliedJoint(prim, ancestor, name))
     }
@@ -669,13 +690,37 @@ function impliedJoint(prim: Prim, ancestor: Prim, name: string): DescriptionJoin
     }
 }
 
-function linkAncestor(prim: Prim): Prim | null {
+function linkAncestor(prim: Prim, sceneRoot: Prim | null): Prim | null {
     let parent = prim.parent
     while (parent) {
-        if (isLink(parent)) return parent
+        if (isLink(parent) || parent === sceneRoot) return parent
         parent = parent.parent
     }
     return null
+}
+
+/**
+ * The layer's root prim, when it holds bodies but is not marked as one itself — otherwise null.
+ *
+ * A scene converted from MJCF has a body per desk and a plain Xform at the root, because MuJoCo's worldbody
+ * carries no rigid body of its own. Read literally that makes every stick of furniture a body with no body above
+ * it: nothing to weld to, so it can only be placed by a transform published under its own name, and nothing
+ * publishes one per desk. The room then draws as the robots standing in it and nothing else.
+ *
+ * Taking the root as a frame gives the nesting back its meaning — one frame for the room, everything in it welded
+ * to that, each at the transform it already carries. A layer whose root is already a body (every robot) has none
+ * of this apply to it.
+ */
+function rootFrame(roots: Prim[], defaultPrim: string | null): Prim | null {
+    const root = roots.find((prim) => prim.name === defaultPrim) ?? (roots.length === 1 ? roots[0] : null)
+    if (!root || isLink(root)) return null
+    let orphans = 0
+    walk(root.children, (prim) => {
+        if (isLink(prim) && !linkAncestor(prim, null)) orphans += 1
+    })
+    // One is a base link, which is meant to have no parent and is placed from tf. Several means
+    // nobody is holding them: that is a room, and the root is the frame they all stand in.
+    return orphans > 1 ? root : null
 }
 
 function pathOf(prim: Prim): string {
@@ -735,3 +780,66 @@ function rotate(q: [number, number, number, number], v: [number, number, number]
         vz + (x * ty - y * tx),
     ]
 }
+
+/** USD light prims, by their schema name. A layer that names none leaves the viewer's own lighting in place. */
+const LIGHT_TYPES: Record<string, DescriptionLight["type"]> = {
+    DistantLight: "distant",
+    SphereLight: "point",
+    DiskLight: "point",
+    RectLight: "point",
+    DomeLight: "ambient",
+}
+
+/**
+ * Every light the layer carries, in world space.
+ *
+ * A scene knows how it is lit -- office_555 names a sun and eighteen ceiling fittings -- and a renderer told none
+ * of it has to invent some, which in practice is a flat ambient fill leaving every surface the same shade. Reading
+ * them lets the layer say instead.
+ *
+ * World space, because a light is placed by composing the transforms above it and the viewer adds it to the scene
+ * rather than to the link it was authored under: a lamp bolted to a moving body is rare, and lighting the common
+ * case is worth more than following one around.
+ */
+function lightsOf(roots: Prim[]): DescriptionLight[] {
+    const found: DescriptionLight[] = []
+    const visit = (prim: Prim, parent: Origin): void => {
+        const here = compose(parent, placementOf(prim))
+        const type = LIGHT_TYPES[prim.type]
+        if (type) {
+            const light = lightOf(prim, type, here)
+            if (light) found.push(light)
+        }
+        for (const child of prim.children) visit(child, here)
+    }
+    for (const root of roots) visit(root, { xyz: [0, 0, 0], quat: [0, 0, 0, 1] })
+    return found
+}
+
+function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): DescriptionLight | null {
+    const intensity = Number(prim.attrs["inputs:intensity"] ?? prim.attrs["intensity"] ?? 1)
+    if (!(intensity > 0)) return null
+    const colour = numbers(prim.attrs["inputs:color"] ?? prim.attrs["color"])
+    // A light shines down its own -Z; where that points once the transforms above it are applied is its direction.
+    const direction = rotate(world.quat, [0, 0, -1])
+    const shadow = unquote(prim.attrs["inputs:shadow:enable"] ?? prim.attrs["shadow:enable"] ?? "1")
+    return {
+        name: frameName(prim),
+        type,
+        xyz: world.xyz,
+        direction,
+        color: colour.length >= 3 ? [colour[0], colour[1], colour[2]] : [1, 1, 1],
+        intensity,
+        shadow: shadow !== "0" && shadow !== "false",
+    }
+}
+
+/** `parent` then `child`, as one place in the world. Scale is not composed: a light has no size to scale. */
+function compose(parent: Origin, child: Origin): Origin {
+    const turned = rotate(parent.quat, child.xyz)
+    return {
+        xyz: [parent.xyz[0] + turned[0], parent.xyz[1] + turned[1], parent.xyz[2] + turned[2]],
+        quat: multiply(parent.quat, child.quat),
+    }
+}
+

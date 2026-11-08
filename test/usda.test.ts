@@ -283,3 +283,97 @@ test("displayColor still wins over the bound material", () => {
     const visuals = parseUsda(_MATERIALS).links[0].visuals
     assertEquals(visuals[1].color, [1, 0, 0, 1])
 })
+
+// A room written the way MuJoCo's converter writes one: a plain Xform at the root, a body per thing standing in
+// it, and geoms that are both the collider and the thing you see.
+const room = `#usda 1.0
+(
+    defaultPrim = "office"
+)
+
+def Xform "office" (
+    apiSchemas = ["GeomModelAPI"]
+)
+{
+    def Scope "Geometry"
+    {
+        def Xform "desk" (
+            apiSchemas = ["PhysicsRigidBodyAPI"]
+        )
+        {
+            double3 xformOp:translate = (2, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "desk_g0" (
+                apiSchemas = ["PhysicsCollisionAPI", "MjcCollisionAPI"]
+            )
+            {
+                double size = 2
+                float3 xformOp:scale = (1, 0.5, 0.4)
+                uniform token[] xformOpOrder = ["xformOp:scale"]
+            }
+
+            def Cube "desk_hull" (
+                apiSchemas = ["PhysicsCollisionAPI", "MjcCollisionAPI"]
+            )
+            {
+                uniform int mjc:group = 3
+                double size = 2
+            }
+        }
+
+        def Xform "wall" (
+            apiSchemas = ["PhysicsRigidBodyAPI"]
+        )
+        {
+            double3 xformOp:translate = (0, 5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+
+            def Cube "wall_g0" (
+                apiSchemas = ["PhysicsCollisionAPI", "MjcCollisionAPI"]
+            )
+            {
+                double size = 2
+            }
+        }
+    }
+}
+`
+
+test("a room whose root is not a body still hangs off one frame", () => {
+    // Every body in a converted scene sits under a plain Xform, because MuJoCo's worldbody carries no rigid body.
+    // Read literally that makes each one an orphan placeable only from tf, and nothing publishes a transform per
+    // desk -- so the room drew as whatever was standing in it and nothing else.
+    const description = parseUsda(room)
+    assertEquals(description.base_link, "office")
+    const welds = description.joints.filter((each) => each.type === "fixed").map((each) => `${each.parent}->${each.child}`)
+    assertEquals(welds.sort(), ["office->desk", "office->wall"])
+    // each still at its own place, not stacked on the room's origin or on each other
+    assertEquals(joint(description.joints, "desk_weld").origin.xyz, [2, 0, 0])
+    assertEquals(joint(description.joints, "wall_weld").origin.xyz, [0, 5, 0])
+})
+
+test("a link with nothing but a collider is drawn as its collider", () => {
+    // MuJoCo collides the shape it draws, so a wall is a collider and nothing else. Taking that to mean "do not
+    // draw" threw away every wall, floor and slab of a converted room and left only the furniture, which happens
+    // to carry separate visual meshes.
+    const description = parseUsda(room)
+    const wall = description.links.find((link) => link.name === "wall")
+    assert(wall, "no wall link")
+    assertEquals(wall.visuals.length, 1, "nothing else to show for it, so the collider is what it looks like")
+    assertEquals(wall.collisions.length, 1, "...and it is still a collider")
+})
+
+test("a link that has something to show keeps its colliders to itself", () => {
+    // A collider only stands in where there is no visual at all. Given one, the desk shows that and nothing else.
+    const withVisual = room.replace(
+        '            def Cube "desk_hull" (',
+        '            def Cube "desk_visual"\n            {\n                double size = 1\n            }\n\n'
+            + '            def Cube "desk_hull" (',
+    )
+    const description = parseUsda(withVisual)
+    const desk = description.links.find((link) => link.name === "desk")
+    assert(desk, "no desk link")
+    assertEquals(desk.visuals.length, 1, "the one shape with no collider on it")
+    assertEquals(desk.collisions.length, 2, "both colliders stay colliders")
+})
