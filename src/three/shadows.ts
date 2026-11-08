@@ -54,10 +54,10 @@ export const MAX_SHADOW_LAMPS = 4
 /** A lamp inside the room: a near shadow, cheap enough that a handful can afford one. */
 export function lampCastsShadow(light: THREE.PointLight, reach: number) {
     light.castShadow = true
-    // 512 across a quarter-turn is about a centimetre of floor per texel four metres down, and a
-    // desk lit from almost straight above self-shadows in stripes at that spacing. Only a few lamps
-    // cast at once, so the finer map is affordable where eighteen of them would not be.
-    light.shadow.mapSize.set(1024, 1024)
+    // 1024 was tried for the banding below and is not worth it: four lamps of cube map at that size
+    // is a hundred megabytes of shadow texture, and asking for it cost the standard-material shader
+    // program its link -- every mesh in the room vanished while the grid, on a line material, stayed.
+    light.shadow.mapSize.set(512, 512)
     light.shadow.bias = -0.004
     // a cube face covers a quarter-turn, so one texel is ~0.1 deg; the offset is set from that at
     // the far end of the lamp's reach rather than from the scene, which is what a room-sized
