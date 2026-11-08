@@ -335,11 +335,6 @@ export class Viewer {
             ? THREE.NoToneMapping
             : THREE.ACESFilmicToneMapping
         renderer.toneMappingExposure = look?.exposure ?? DEFAULT_EXPOSURE
-        // environmentIntensity is accepted and, for now, does nothing: the sky this viewer paints is a
-        // one-pixel-wide gradient strip, which is all a background needs and is a degenerate source for the
-        // pre-filtering an environment map has to go through. Handing it to scene.environment produced an
-        // invalid shader program. Real image-based lighting wants a proper PMREM off a wider strip; until
-        // that exists this stays a no-op rather than a broken one.
         const saturation = look?.saturation ?? 1
         const contrast = look?.contrast ?? 1
         const grade = []

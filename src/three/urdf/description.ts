@@ -62,7 +62,6 @@ export interface DescriptionLight {
 export interface DescriptionLook {
     toneMap?: "neutral" | "filmic" | "linear" | "none"
     exposure?: number
-    environmentIntensity?: number
     saturation?: number
     contrast?: number
 }

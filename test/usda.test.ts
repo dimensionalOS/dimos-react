@@ -442,7 +442,7 @@ def RenderSettings "Look"
     assertAlmostEquals(look.saturation ?? 0, 1.25, 1e-6)
     assertAlmostEquals(look.contrast ?? 0, 1.06, 1e-6)
     // Absent is not the same as default: a viewer told nothing keeps whatever it already had.
-    assertEquals(look.environmentIntensity, undefined)
+    assertEquals(look.toneMap !== undefined && look.exposure !== undefined, true)
 
     const plain = `#usda 1.0
 (
