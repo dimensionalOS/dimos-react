@@ -54,12 +54,16 @@ export const MAX_SHADOW_LAMPS = 4
 /** A lamp inside the room: a near shadow, cheap enough that a handful can afford one. */
 export function lampCastsShadow(light: THREE.PointLight, reach: number) {
     light.castShadow = true
-    light.shadow.mapSize.set(512, 512)
+    // 512 across a quarter-turn is about a centimetre of floor per texel four metres down, and a
+    // desk lit from almost straight above self-shadows in stripes at that spacing. Only a few lamps
+    // cast at once, so the finer map is affordable where eighteen of them would not be.
+    light.shadow.mapSize.set(1024, 1024)
     light.shadow.bias = -0.004
-    // a cube face covers a quarter-turn, so one texel is ~0.2 deg; the offset is set from that at
+    // a cube face covers a quarter-turn, so one texel is ~0.1 deg; the offset is set from that at
     // the far end of the lamp's reach rather than from the scene, which is what a room-sized
-    // directional bias would be
-    light.shadow.normalBias = Math.max(0.02, reach * 0.004)
+    // directional bias would be, and generously, because banding on a desk top is far more obvious
+    // than a shadow sitting a centimetre off the thing that casts it
+    light.shadow.normalBias = Math.max(0.05, reach * 0.012)
     const camera = light.shadow.camera
     camera.near = 0.15
     camera.far = reach
