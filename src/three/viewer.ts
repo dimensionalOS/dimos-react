@@ -117,6 +117,8 @@ export class Viewer {
     #defaultLights: THREE.Light[] = []
     /** the lighting a loaded scene asked for, which stands in for the defaults while it is there */
     #sceneLights: THREE.Light[] = []
+    #look: DescriptionLook | null = null
+    #shadowLamps: THREE.PointLight[] = []
     /** every light casting a shadow right now: their boxes are re-aimed as the drawn scene grows */
     #shadowCasters: THREE.DirectionalLight[] = []
     /** the bounds the casters were last aimed at, to tell a scene that grew from one that only moved */
@@ -321,6 +323,7 @@ export class Viewer {
      * extra target to composite through -- worth more here than the precision a real pass would buy.
      */
     setSceneLook(look: DescriptionLook | null | undefined): void {
+        this.#look = look ?? null
         const renderer = this.renderer
         if (!renderer) return
         const curve = look?.toneMap
@@ -348,21 +351,24 @@ export class Viewer {
             light.dispose()
         }
         this.#sceneLights = []
+        this.#shadowLamps = []
         this.#shadowCasters = this.#defaultLights.filter((light) => light.castShadow) as THREE.DirectionalLight[]
         const wanted = lights ?? []
         if (!wanted.some((light) => light.type === "dome")) {
             this.#clearSky()
         }
         for (const light of this.#defaultLights) light.visible = wanted.length === 0
-        // A lamp's shadow is a cube map -- six renders a frame -- so only the strongest few get
-        // one. Without any, a room lit from its own ceiling has nothing standing on the floor:
-        // the sun through the windows is the only thing casting, and a desk under a fitting
-        // throws no shadow of its own.
+        // A lamp's shadow is a cube map -- six renders a frame -- so only a few get one. Without
+        // any, a room lit from its own ceiling has nothing standing on the floor: the sun through
+        // the windows is the only thing casting, and a desk under a fitting throws no shadow of
+        // its own.
+        //
+        // Which few is decided per frame by #aimShadowLamps, not here, because a room's fittings
+        // are all the same lamp: picking "the brightest" off eighteen identical ceiling lights is
+        // an all-ties sort that always lands on the same arbitrary corner, and every desk
+        // elsewhere stays shadowless.
         const lamps = wanted.filter((light) =>
             light.type !== "distant" && light.type !== "dome" && light.type !== "ambient"
-        )
-        const casting = new Set(
-            [...lamps].sort((a, b) => b.intensity - a.intensity).slice(0, MAX_SHADOW_LAMPS),
         )
         for (const light of wanted) {
             const colour = new THREE.Color(light.color[0], light.color[1], light.color[2])
@@ -392,9 +398,8 @@ export class Viewer {
                 }
             } else {
                 made.position.set(...light.xyz)
-                if (made instanceof THREE.PointLight && light.shadow && casting.has(light)) {
-                    // it only has to reach the floor and the furniture under it, not the room
-                    lampCastsShadow(made, Math.max(4, made.position.z * 1.6))
+                if (made instanceof THREE.PointLight && light.shadow && lamps.includes(light)) {
+                    this.#shadowLamps.push(made)
                 }
             }
             made.layers.enable(ON_TOP_CHANNEL)
@@ -403,7 +408,45 @@ export class Viewer {
         }
         this.#shadowBounds = null
         this.#fitShadows()
+        // These lights are new, so whatever the look said about the sky and the hemisphere has to be said
+        // again; otherwise a rebuild quietly lights the room twice.
+        if (this.#look) {
+            this.setSceneLook(this.#look)
+        }
         this.requestRender()
+    }
+
+    /**
+     * Give the cube maps to the lamps nearest the camera.
+     *
+     * A ceiling's fittings are all the same lamp, so there is no "brightest few" to choose: every
+     * ranking by intensity is a tie, and the same arbitrary three win every time while the rest of
+     * the room casts nothing. What matters is which lamps light the part of the room being looked
+     * at, and that changes as the camera moves, so it is decided per refit rather than once.
+     */
+    #aimShadowLamps(): void {
+        if (this.#shadowLamps.length === 0) {
+            return
+        }
+        const eye = this.camera.position
+        const nearest = [...this.#shadowLamps]
+            .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
+            .slice(0, MAX_SHADOW_LAMPS)
+        const chosen = new Set(nearest)
+        for (const lamp of this.#shadowLamps) {
+            const wanted = chosen.has(lamp)
+            if (wanted === lamp.castShadow) {
+                continue
+            }
+            if (wanted) {
+                // it only has to reach the floor and the furniture under it, not the room
+                lampCastsShadow(lamp, Math.max(4, lamp.position.z * 1.6))
+            } else {
+                lamp.castShadow = false
+                lamp.shadow.map?.dispose()
+                lamp.shadow.map = null
+            }
+        }
     }
 
     /**
@@ -901,6 +944,7 @@ export class Viewer {
         if (now - this.#shadowFittedAt > SHADOW_REFIT_MS) {
             this.#shadowFittedAt = now
             this.#fitShadows()
+            this.#aimShadowLamps()
         }
         const dt = this.#lastFrame ? (now - this.#lastFrame) / 1000 : 0
         this.#lastFrame = now

@@ -49,7 +49,7 @@ export function aimShadow(light: THREE.DirectionalLight, box: THREE.Box3) {
 /** How many of a scene's own lamps may cast. A point light's shadow is a cube -- six renders of
  * the scene every frame -- so eighteen ceiling fittings would be a hundred and eight. The few
  * strongest are what a room's shape reads from; the rest still light it, they just do not occlude. */
-export const MAX_SHADOW_LAMPS = 3
+export const MAX_SHADOW_LAMPS = 4
 
 /** A lamp inside the room: a near shadow, cheap enough that a handful can afford one. */
 export function lampCastsShadow(light: THREE.PointLight, reach: number) {
