@@ -8,8 +8,22 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
 import { CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js"
 import type { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js"
 import { Store } from "./store.ts"
+import type { DescriptionLight } from "./urdf/description.ts"
 import { focusDistance, splatBackground } from "./point_material.ts"
 import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
+
+// A layer states a light's brightness the way MuJoCo does: the magnitude of its colour, 0..1. Turning that into
+// three's units is this side's job, because only this side knows three's falloff model.
+//
+// A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
+const DISTANT_GAIN = 3
+// A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
+// on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
+// fittings contribute nothing at all -- 0.72 at the bulb is 0.08 by the time it reaches the floor.
+const POINT_REFERENCE_METRES = 3
+const POINT_GAIN = 4
+// Ambient has no direction to fall off along; it is the fill that keeps shadows from going black.
+const AMBIENT_GAIN = 2
 import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
@@ -93,6 +107,10 @@ export class Viewer {
     labels: CSS2DRenderer
     scene = new THREE.Scene()
     camera = new THREE.PerspectiveCamera(60, 1, 0.05, 10000)
+    /** the lighting used when nothing in the scene says what its own is */
+    #defaultLights: THREE.Light[] = []
+    /** the lighting a loaded scene asked for, which stands in for the defaults while it is there */
+    #sceneLights: THREE.Light[] = []
     controls: OrbitControls
     stats: Store<RenderStats> = new Store({
         fps: 0,
@@ -189,6 +207,13 @@ export class Viewer {
             renderer = new THREE.WebGLRenderer({ antialias, alpha: true, powerPreference: "high-performance" })
             renderer.setPixelRatio(pixelRatio())
             renderer.setClearColor(0x000000, 0)
+            // Lights are given in the intensities a room really has, which blow out without one. Filmic rolls the
+            // highlights off instead of clipping them to white.
+            renderer.toneMapping = THREE.ACESFilmicToneMapping
+            renderer.toneMappingExposure = 1.1
+            // A shape only reads as a shape if something is darker than the rest of it.
+            renderer.shadowMap.enabled = true
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap
         } catch (error) {
             console.warn("3D view: WebGL unavailable", error)
         }
@@ -215,14 +240,33 @@ export class Viewer {
             this.#glide = null
         })
 
-        const sky = new THREE.HemisphereLight(0xdde8ff, 0x202830, 1.6)
-        const sun = new THREE.DirectionalLight(0xffffff, 1.2)
+        // A hemisphere light bright enough to light the scene on its own lights every face of every object the
+        // same, which is why a room full of furniture came out as flat pastel cutouts. It belongs at the level of
+        // light bouncing off the walls; what shows a shape is a key light strong enough to leave the far side of
+        // it dark, with shadows underneath. The fill opposite the key keeps that far side readable rather than
+        // black.
+        const sky = new THREE.HemisphereLight(0xdde8ff, 0x202830, 0.5)
+        const sun = new THREE.DirectionalLight(0xfff4e6, 2.4)
         sun.position.set(5, 3, 10)
-        for (const light of [sky, sun]) {
+        sun.castShadow = true
+        sun.shadow.mapSize.set(2048, 2048)
+        sun.shadow.bias = -0.0005
+        // The default shadow camera is 10 m across: a room is tens of metres, and anything outside the box casts
+        // nothing at all.
+        const shadowBox = sun.shadow.camera
+        shadowBox.left = shadowBox.bottom = -25
+        shadowBox.right = shadowBox.top = 25
+        shadowBox.near = 0.5
+        shadowBox.far = 120
+        shadowBox.updateProjectionMatrix()
+        const fill = new THREE.DirectionalLight(0xdfe8ff, 0.6)
+        fill.position.set(-6, -4, 3)
+        for (const light of [sky, sun, fill]) {
             // lights only reach the passes whose channel they're on
             light.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(light)
         }
+        this.#defaultLights = [sky, sun, fill]
         this.setTheme()
 
         this.#resizeObserver = new ResizeObserver(() => this.#resize())
@@ -246,6 +290,60 @@ export class Viewer {
         grid.material.opacity = dark ? 0.7 : 0.55
         grid.visible = this.#gridVisible
         return grid
+    }
+
+    /**
+     * Light the scene the way a loaded description says to, instead of the viewer's own guess.
+     *
+     * A scene knows how it is lit and the viewer does not: office_555 names a sun and eighteen ceiling fittings,
+     * and lighting it with one fixed key and a fill renders it as flat pastel cutouts no matter how the room was
+     * built. Passing an empty list (or none) puts the defaults back, which is what a robot on its own wants.
+     *
+     * Intensities arrive in USD's photometric units, where a lamp is in the hundreds; three's lights are relative,
+     * so a point light is divided back down by the same factor the exporter multiplied up by.
+     */
+    setSceneLights(lights: readonly DescriptionLight[] | null | undefined): void {
+        for (const light of this.#sceneLights) {
+            light.removeFromParent()
+            light.dispose()
+        }
+        this.#sceneLights = []
+        const wanted = lights ?? []
+        for (const light of this.#defaultLights) light.visible = wanted.length === 0
+        for (const light of wanted) {
+            const colour = new THREE.Color(light.color[0], light.color[1], light.color[2])
+            const made = light.type === "distant"
+                ? new THREE.DirectionalLight(colour, light.intensity * DISTANT_GAIN)
+                : light.type === "ambient"
+                ? new THREE.HemisphereLight(colour, colour.clone().multiplyScalar(0.4), light.intensity * AMBIENT_GAIN)
+                : new THREE.PointLight(
+                    colour,
+                    light.intensity * POINT_GAIN * POINT_REFERENCE_METRES * POINT_REFERENCE_METRES,
+                    0,
+                    2,
+                )
+            if (made instanceof THREE.DirectionalLight) {
+                // A distant light has no position, only a direction: put it far enough out to clear the scene.
+                made.position.set(...(light.direction.map((value) => -value * 50) as [number, number, number]))
+                made.castShadow = light.shadow
+                if (light.shadow) {
+                    made.shadow.mapSize.set(2048, 2048)
+                    made.shadow.bias = -0.0005
+                    const box = made.shadow.camera
+                    box.left = box.bottom = -25
+                    box.right = box.top = 25
+                    box.near = 0.5
+                    box.far = 160
+                    box.updateProjectionMatrix()
+                }
+            } else {
+                made.position.set(...light.xyz)
+            }
+            made.layers.enable(ON_TOP_CHANNEL)
+            this.scene.add(made)
+            this.#sceneLights.push(made)
+        }
+        this.requestRender()
     }
 
     /** Re-reads the theme: grid, fog and splat background (the background itself is CSS behind the canvas). */
