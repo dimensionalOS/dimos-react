@@ -85,8 +85,8 @@ export function parseUsda(text: string): RobotDescription {
 export function usdaMeshUris(text: string): string[] {
     const uris: string[] = []
     walk(parsePrims(text), (prim) => {
-        const reference = referenceOf(prim)
-        if (reference) uris.push(reference)
+        const mesh = meshPathOf(prim)
+        if (mesh) uris.push(mesh)
     })
     return [...new Set(uris)]
 }
@@ -104,7 +104,7 @@ export function usdaMeshUris(text: string): string[] {
 export function usdaAssetHashes(text: string): Map<string, string> {
     const hashes = new Map<string, string>()
     walk(parsePrims(text), (prim) => {
-        const path = referenceOf(prim) ?? assetInfoPath(prim)
+        const path = meshPathOf(prim)
         const version = assetInfoVersion(prim)
         if (path && version) hashes.set(path, version)
     })
@@ -273,6 +273,12 @@ function readDef(text: string, at: number): Found {
         scanAt += 1
     }
     const head = text.slice(at, scanAt)
+    // The head stops at the newline so a def with neither metadata nor body cannot swallow the
+    // line after it. But USD lets the metadata's `(` sit on its own line, and pxr writes it that
+    // way whenever the head is long -- so look past blanks for it, and only commit to the jump
+    // if what is there really is metadata or a body. dimos's own layers use both forms.
+    const afterBlanks = skipBlanks(text, scanAt)
+    if (text[afterBlanks] === "(" || text[afterBlanks] === "{") scanAt = afterBlanks
     let meta: string | undefined
     if (text[scanAt] === "(") {
         const close = matching(text, scanAt, "(", ")")
@@ -440,9 +446,19 @@ function numbers(value: string | undefined): number[] {
 /** A prim's own transform, as the origin a URDF would state. */
 function placementOf(prim: Prim): Origin {
     const matrix = numbers(prim.attrs["xformOp:transform"])
-    if (matrix.length < 16) return { xyz: [0, 0, 0], quat: [0, 0, 0, 1] }
     // USD writes a matrix4d row by row, and the translation is its last row.
-    return { xyz: [matrix[12], matrix[13], matrix[14]], quat: quatFromRows(matrix) }
+    if (matrix.length >= 16) return { xyz: [matrix[12], matrix[13], matrix[14]], quat: quatFromRows(matrix) }
+    // A hand-written layer usually places a prim with translate/orient rather than one matrix,
+    // and USD treats the two as equally normal. Reading only the matrix left every such prim at
+    // the origin -- three robots standing 1.2 m apart rendered on top of each other, with
+    // nothing to say they had been moved.
+    const translate = numbers(prim.attrs["xformOp:translate"])
+    const orient = numbers(prim.attrs["xformOp:orient"])
+    return {
+        xyz: translate.length >= 3 ? [translate[0], translate[1], translate[2]] : [0, 0, 0],
+        // USD writes a quatf as (w, x, y, z); three wants (x, y, z, w).
+        quat: orient.length >= 4 ? [orient[1], orient[2], orient[3], orient[0]] : [0, 0, 0, 1],
+    }
 }
 
 /** The rotation of a row-major 4x4 as (x, y, z, w). */
@@ -468,6 +484,20 @@ function quatFromRows(m: number[]): [number, number, number, number] {
     }
     const s = Math.sqrt(1 + r[2][2] - r[0][0] - r[1][1]) * 2
     return [(r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, s / 4, (r[1][0] - r[0][1]) / s]
+}
+
+/**
+ * The mesh file a geometry prim names, as the thing that can actually be fetched and drawn.
+ *
+ * `assetInfo` first, deliberately. dimos names the servable file there -- an STL or a DAE -- and
+ * uses the reference arc, where it has one, for a `.usdc` sidecar carrying the same geometry so
+ * the layer is valid USD for usdview, Isaac and MuJoCo. Reading the arc first asks for the
+ * sidecar, which the mesh loader refuses ("unsupported mesh format .usdc") and nothing is drawn.
+ * A layer with only an arc (a plain USD scene from elsewhere) still works: the arc is the
+ * fallback.
+ */
+function meshPathOf(prim: Prim): string | null {
+    return assetInfoPath(prim) ?? referenceOf(prim)
 }
 
 function referenceOf(prim: Prim): string | null {
@@ -496,7 +526,7 @@ function geometryOf(prim: Prim): DescriptionGeometry | null {
     const scale = numbers(prim.attrs["xformOp:scale"])
     const color = numbers(prim.attrs["primvars:displayColor"])
     const tint: Partial<DescriptionGeometry> = color.length >= 3 ? { color: [color[0], color[1], color[2], 1] } : {}
-    const mesh = referenceOf(prim)
+    const mesh = meshPathOf(prim)
     if (prim.type === "Mesh" || mesh) {
         if (!mesh) return null
         return {

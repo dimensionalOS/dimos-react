@@ -150,3 +150,81 @@ test("a layer that hashes nothing is empty rather than an error", () => {
     const bare = '#usda 1.0\n(\n    defaultPrim = "x"\n)\n\ndef Xform "x"\n{\n}\n'
     assertEquals(usdaAssetHashes(bare).size, 0)
 })
+
+// ---- what dimos's own vendored layers look like ----------------------------
+// A mesh prim there names the servable file in assetInfo and uses the reference arc for a
+// `.usdc` sidecar, so the layer is valid USD for usdview, Isaac and MuJoCo. Reading the arc
+// first asks for the sidecar, which the mesh loader refuses and nothing is drawn.
+const _SIDECAR = `#usda 1.0
+(
+    defaultPrim = "rig"
+)
+
+def Xform "rig"
+(
+    prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+)
+{
+    def Mesh "visual_0" (
+        assetInfo = {
+            asset identifier = @meshes/arm.STL@
+            string version = "sha256:abc"
+        }
+        prepend references = @meshes/arm.usdc@
+    )
+    {
+    }
+}
+`
+
+test("a mesh is fetched by the file assetInfo names, not the USD sidecar it references", () => {
+    assertEquals(usdaMeshUris(_SIDECAR), ["meshes/arm.STL"])
+})
+
+test("the hash is filed under the same path the mesh is fetched by", () => {
+    // Keyed by the sidecar instead, every lookup would miss and nothing would ever be cached.
+    assertEquals([...usdaAssetHashes(_SIDECAR)], [["meshes/arm.STL", "sha256:abc"]])
+})
+
+test("a layer with only a reference arc still resolves it", () => {
+    const arcOnly = _SIDECAR.replace(/assetInfo = \{[^}]*\}\n\s*/, "")
+    assertEquals(usdaMeshUris(arcOnly), ["meshes/arm.usdc"])
+})
+
+const _PLACED = `#usda 1.0
+(
+    defaultPrim = "stage"
+)
+
+def Xform "stage"
+(
+    prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+)
+{
+    def Xform "stand_left" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, 1.2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "stand_right" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+    )
+    {
+        double3 xformOp:translate = (0, -1.2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}
+`
+
+test("a prim placed with translate is not left at the origin", () => {
+    // USD treats translate/orient and one matrix4d as equally normal ways to place a prim.
+    // Reading only the matrix put three robots standing 1.2 m apart on top of each other.
+    const placed = parseUsda(_PLACED)
+    const by = new Map(placed.joints.map((joint: DescriptionJoint) => [joint.child, joint]))
+
+    assertAlmostEquals(by.get("stand_left")!.origin.xyz[1], 1.2, 1e-9)
+    assertAlmostEquals(by.get("stand_right")!.origin.xyz[1], -1.2, 1e-9)
+})
