@@ -31,6 +31,7 @@ import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
 import { aimShadow, castsShadow, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
+import { SKY_ROTATION_X, skyTexture } from "./sky.ts"
 
 export interface RenderStats {
     fps: number
@@ -401,38 +402,24 @@ export class Viewer {
         this.requestRender()
     }
 
-    /** The sky a scene's dome light stands for: lighter at the horizon, deeper overhead.
-     *
-     * A flat fill reads as a wall rather than a sky, and the gradient is what tells you which way
-     * is up when the camera is outside the room looking in. Drawn as the scene's background, so it
-     * sits behind everything and takes no depth.
-     */
+    /** The sky a scene's dome light stands for, behind everything and taking no depth. */
     #setSky(colour: THREE.Color, intensity: number) {
-        const canvas = document.createElement("canvas")
-        canvas.width = 2
-        canvas.height = 128
-        const context = canvas.getContext("2d")
-        if (!context) return
-        const lit = colour.clone().multiplyScalar(Math.min(Math.max(intensity, 0.15), 1.4))
-        const horizon = lit.clone().lerp(new THREE.Color(1, 1, 1), 0.55)
-        const zenith = lit.clone().multiplyScalar(0.72)
-        const gradient = context.createLinearGradient(0, 0, 0, canvas.height)
-        gradient.addColorStop(0, `#${zenith.getHexString()}`)
-        gradient.addColorStop(1, `#${horizon.getHexString()}`)
-        context.fillStyle = gradient
-        context.fillRect(0, 0, canvas.width, canvas.height)
-        const texture = new THREE.CanvasTexture(canvas)
-        texture.colorSpace = THREE.SRGBColorSpace
-        texture.mapping = THREE.EquirectangularReflectionMapping
+        const texture = skyTexture(colour, intensity)
+        if (!texture) {
+            return
+        }
         this.#sky?.dispose()
         this.#sky = texture
         this.scene.background = texture
+        // three samples the background on world Y; this viewer is Z-up, so the strip has to be turned
+        this.scene.backgroundRotation.set(SKY_ROTATION_X, 0, 0)
     }
 
     /** Back to the themed background (CSS behind the canvas), and let the texture go. */
     #clearSky() {
         if (!this.#sky) return
         this.scene.background = null
+        this.scene.backgroundRotation.set(0, 0, 0)
         this.#sky.dispose()
         this.#sky = null
     }
