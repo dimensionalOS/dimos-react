@@ -787,7 +787,7 @@ const LIGHT_TYPES: Record<string, DescriptionLight["type"]> = {
     SphereLight: "point",
     DiskLight: "point",
     RectLight: "point",
-    DomeLight: "ambient",
+    DomeLight: "dome",
 }
 
 /**

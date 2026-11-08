@@ -377,3 +377,36 @@ test("a link that has something to show keeps its colliders to itself", () => {
     assertEquals(desk.visuals.length, 1, "the one shape with no collider on it")
     assertEquals(desk.collisions.length, 2, "both colliders stay colliders")
 })
+
+test("a dome light is the sky, not just another ambient fill", () => {
+    // A viewer that only lights by it leaves flat black outside the windows of a room that
+    // told it what the sky looks like. Keeping dome distinct from ambient is what lets the
+    // viewer paint it as well as light by it.
+    const sky = `#usda 1.0
+(
+    defaultPrim = "room"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "room"
+{
+    def DomeLight "sky"
+    {
+        color3f inputs:color = (0.45, 0.6, 0.95)
+        float inputs:intensity = 0.8
+    }
+
+    def DistantLight "sun"
+    {
+        color3f inputs:color = (1, 1, 1)
+        float inputs:intensity = 0.5
+    }
+}
+`
+    const lights = parseUsda(sky).lights ?? []
+    const dome = lights.find((light) => light.type === "dome")
+    assert(dome, `no dome light in ${lights.map((light) => light.type).join(", ")}`)
+    assertAlmostEquals(dome.color[2], 0.95, 1e-6, "the sky keeps its own colour")
+    assertEquals(lights.filter((light) => light.type === "distant").length, 1, "the sun is still a sun")
+})

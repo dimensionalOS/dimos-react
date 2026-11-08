@@ -34,12 +34,13 @@ export interface DescriptionLink {
  * A light the description carries, so a scene says how it is lit rather than leaving it to whoever draws it.
  *
  * `distant` has a direction and no position, like the sun; `point` has a position; `ambient` has neither and comes
- * from every direction at once. `color` is linear RGB with the brightness taken out of it, which `intensity`
- * carries instead.
+ * from every direction at once. `dome` is the sky: ambient light, and the thing you see when you look past the
+ * scene, so a viewer can paint it behind everything as well as light by it. `color` is linear RGB with the
+ * brightness taken out of it, which `intensity` carries instead.
  */
 export interface DescriptionLight {
     name: string
-    type: "distant" | "point" | "ambient"
+    type: "distant" | "point" | "ambient" | "dome"
     /** where it is, for a point light */
     xyz: V3
     /** where it shines, for a distant light */
