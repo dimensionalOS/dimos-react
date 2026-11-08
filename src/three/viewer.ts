@@ -432,7 +432,12 @@ export class Viewer {
             }
         })
         if (box.isEmpty()) {
-            return
+            // Nothing drawn yet, or a view that is only point clouds: the caster still needs somewhere to
+            // stand, or it sits at the origin aimed at the origin and lights nothing at all.
+            box.setFromCenterAndSize(
+                new THREE.Vector3(),
+                new THREE.Vector3(1, 1, 1).multiplyScalar(2 * SHADOW_MIN_EXTENT_METRES),
+            )
         }
         if (this.#shadowBounds?.containsBox(box)) {
             return
