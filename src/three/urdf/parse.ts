@@ -148,7 +148,11 @@ export function parseUrdf(xml: string): RobotDescription {
 
 /** Every mesh URI the description's links use, once each. */
 export function meshUris(description: RobotDescription): string[] {
-    const uris = description.links.flatMap((link) => [...link.visuals, ...link.collisions]).map((item) => item.mesh)
+    // A texture is fetched the same way a mesh is, over the same file transport, so it belongs in
+    // the same list: nothing else asks for one, and a shape that names an image it never receives
+    // draws untextured for ever.
+    const uris = description.links.flatMap((link) => [...link.visuals, ...link.collisions])
+        .flatMap((item) => [item.mesh, item.texture])
         .filter((uri): uri is string => !!uri)
     return [...new Set(uris)]
 }

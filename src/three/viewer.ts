@@ -290,7 +290,9 @@ export class Viewer {
         grid.rotation.x = Math.PI / 2
         grid.userData.noPick = true
         grid.material.transparent = true
-        grid.material.opacity = dark ? 0.7 : 0.55
+        // It is a ruler, not scenery. At 0.7 it read as a tiled floor laid over the room and
+        // competed with what is actually there; faint enough to measure against and no more.
+        grid.material.opacity = dark ? 0.18 : 0.14
         grid.visible = this.#gridVisible
         return grid
     }

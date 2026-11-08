@@ -20,6 +20,8 @@ export interface DescriptionGeometry {
     radius?: number
     length?: number
     color?: [number, number, number, number]
+    /** an image the bound material names (UsdUVTexture), to be fetched like a mesh file and tiled over this shape */
+    texture?: string
 }
 
 export interface DescriptionLink {

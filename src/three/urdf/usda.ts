@@ -511,14 +511,34 @@ function quatFromRows(m: number[]): [number, number, number, number] {
  * geometry helper. parseUsda refills it before each parse.
  */
 const materials = new Map<string, [number, number, number, number]>()
+const materialTextures = new Map<string, string>()
 
 function indexMaterials(roots: Prim[]): void {
     materials.clear()
+    materialTextures.clear()
     walk(roots, (prim) => {
         if (prim.type !== "Material") return
         const color = numbers(prim.attrs["inputs:color"])
         if (color.length >= 3) materials.set(pathOf(prim), [color[0], color[1], color[2], 1])
+        // A material states its image the UsdPreviewSurface way: a UsdUVTexture shader under it
+        // whose inputs:file names the picture, with the surface's diffuseColor connected to it.
+        // The shader is a child prim, so the file is found by looking inside the material rather
+        // than on it.
+        const file = textureUnder(prim)
+        if (file) materialTextures.set(pathOf(prim), file)
     })
+}
+
+/** The image a material's UsdUVTexture names, if it has one. */
+function textureUnder(material: Prim): string | null {
+    let found: string | null = null
+    walk([material], (prim) => {
+        if (found || prim.type !== "Shader") return
+        if (unquote(prim.attrs["info:id"] ?? "") !== "UsdUVTexture") return
+        const file = (prim.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)
+        if (file) found = file[1]
+    })
+    return found
 }
 
 /**
@@ -531,11 +551,17 @@ function indexMaterials(roots: Prim[]): void {
  * only displayColors in a converted layer are the green collision shapes and red sites.
  */
 function colorOf(prim: Prim): Partial<DescriptionGeometry> {
-    const shown = numbers(prim.attrs["primvars:displayColor"])
-    if (shown.length >= 3) return { color: [shown[0], shown[1], shown[2], 1] }
     const bound = (prim.attrs["material:binding"] ?? "").match(/<([^>]+)>/)
+    // The image, where the bound material names one. It is kept even when displayColor decides the
+    // colour: a slab states a flat grey *and* binds the concrete it is actually made of, and three
+    // multiplies the two, so the colour stays as the tint over the picture.
+    const texture = bound ? materialTextures.get(bound[1]) : undefined
+    const shown = numbers(prim.attrs["primvars:displayColor"])
+    if (shown.length >= 3) {
+        return { color: [shown[0], shown[1], shown[2], 1], ...(texture ? { texture } : {}) }
+    }
     const color = bound ? materials.get(bound[1]) : undefined
-    return color ? { color } : {}
+    return { ...(color ? { color } : {}), ...(texture ? { texture } : {}) }
 }
 
 /**
