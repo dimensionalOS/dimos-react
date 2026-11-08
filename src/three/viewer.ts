@@ -24,6 +24,58 @@ const POINT_REFERENCE_METRES = 3
 const POINT_GAIN = 4
 // Ambient has no direction to fall off along; it is the fill that keeps shadows from going black.
 const AMBIENT_GAIN = 2
+// A directional light's shadow is one orthographic box, and anything outside it casts nothing at all. A box
+// of a fixed size around the origin is wrong for a room that is 43 m across and centred 10 m off it: the far
+// half of the room falls outside, and where the boundary crosses a wall it leaves a hard-edged wedge. So the
+// box is fitted to what is drawn instead, and the light aimed at the middle of it rather than at the origin.
+const SHADOW_MIN_EXTENT_METRES = 8
+// Over a whole room one texel covers centimetres, and at that size a depth bias alone cannot keep a wall the
+// light grazes from shadowing itself -- the self-shadowing is a fine diagonal hatch that crawls as the camera
+// moves and reads as z-fighting. normalBias moves the lookup along the surface normal, so it is set from the
+// texel's own size; the finer map above 30 m is what keeps that offset from eating small shadows.
+const SHADOW_TEXELS = 2048
+const SHADOW_TEXELS_LARGE = 4096
+const SHADOW_LARGE_SCENE_METRES = 30
+/** how often the drawn meshes are measured again: they stream in, and the first frame's box is the robot alone */
+const SHADOW_REFIT_MS = 2000
+
+/** Which way the light travels, kept so the caster can be re-aimed when the scene it covers changes. */
+const SHADOW_DIRECTION = "shadowDirection"
+
+/** A directional light that shadows: it keeps its direction, and `aimShadow` sizes the box it covers. */
+function castsShadow(light: THREE.DirectionalLight, direction: THREE.Vector3) {
+    light.castShadow = true
+    light.shadow.bias = -0.0005
+    light.userData[SHADOW_DIRECTION] = direction.clone().normalize()
+}
+
+/** Aim a caster so its shadow box covers the whole of `box`, at the finest texel that stays affordable. */
+function aimShadow(light: THREE.DirectionalLight, box: THREE.Box3) {
+    const direction = light.userData[SHADOW_DIRECTION] as THREE.Vector3 | undefined
+    if (!light.castShadow || !direction) {
+        return
+    }
+    const centre = box.getCenter(new THREE.Vector3())
+    const extent = Math.max(box.getSize(new THREE.Vector3()).length() / 2, SHADOW_MIN_EXTENT_METRES)
+    const texels = extent > SHADOW_LARGE_SCENE_METRES ? SHADOW_TEXELS_LARGE : SHADOW_TEXELS
+    if (light.shadow.mapSize.x !== texels) {
+        light.shadow.mapSize.set(texels, texels)
+        // three only reads mapSize when it allocates the map, so an existing one has to go
+        light.shadow.map?.dispose()
+        light.shadow.map = null
+    }
+    light.shadow.normalBias = 2 * (2 * extent / texels)
+    // the light stands off far enough that the whole box is in front of it
+    light.position.copy(centre).addScaledVector(direction, -(extent + SHADOW_MIN_EXTENT_METRES))
+    light.target.position.copy(centre)
+    light.target.updateMatrixWorld()
+    const camera = light.shadow.camera
+    camera.left = camera.bottom = -extent
+    camera.right = camera.top = extent
+    camera.near = 0.5
+    camera.far = 2 * extent + 2 * SHADOW_MIN_EXTENT_METRES
+    camera.updateProjectionMatrix()
+}
 import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
@@ -111,6 +163,11 @@ export class Viewer {
     #defaultLights: THREE.Light[] = []
     /** the lighting a loaded scene asked for, which stands in for the defaults while it is there */
     #sceneLights: THREE.Light[] = []
+    /** every light casting a shadow right now: their boxes are re-aimed as the drawn scene grows */
+    #shadowCasters: THREE.DirectionalLight[] = []
+    /** the bounds the casters were last aimed at, to tell a scene that grew from one that only moved */
+    #shadowBounds: THREE.Box3 | null = null
+    #shadowFittedAt = 0
     #sky: THREE.CanvasTexture | null = null
     controls: OrbitControls
     stats: Store<RenderStats> = new Store({
@@ -248,18 +305,7 @@ export class Viewer {
         // black.
         const sky = new THREE.HemisphereLight(0xdde8ff, 0x202830, 0.5)
         const sun = new THREE.DirectionalLight(0xfff4e6, 2.4)
-        sun.position.set(5, 3, 10)
-        sun.castShadow = true
-        sun.shadow.mapSize.set(2048, 2048)
-        sun.shadow.bias = -0.0005
-        // The default shadow camera is 10 m across: a room is tens of metres, and anything outside the box casts
-        // nothing at all.
-        const shadowBox = sun.shadow.camera
-        shadowBox.left = shadowBox.bottom = -25
-        shadowBox.right = shadowBox.top = 25
-        shadowBox.near = 0.5
-        shadowBox.far = 120
-        shadowBox.updateProjectionMatrix()
+        castsShadow(sun, new THREE.Vector3(-5, -3, -10))
         const fill = new THREE.DirectionalLight(0xdfe8ff, 0.6)
         fill.position.set(-6, -4, 3)
         for (const light of [sky, sun, fill]) {
@@ -267,7 +313,10 @@ export class Viewer {
             light.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(light)
         }
+        this.scene.add(sun.target)
         this.#defaultLights = [sky, sun, fill]
+        this.#shadowCasters = [sun]
+        this.#fitShadows()
         this.setTheme()
 
         this.#resizeObserver = new ResizeObserver(() => this.#resize())
@@ -309,6 +358,7 @@ export class Viewer {
             light.dispose()
         }
         this.#sceneLights = []
+        this.#shadowCasters = this.#defaultLights.filter((light) => light.castShadow) as THREE.DirectionalLight[]
         const wanted = lights ?? []
         if (!wanted.some((light) => light.type === "dome")) {
             this.#clearSky()
@@ -333,18 +383,12 @@ export class Viewer {
                     2,
                 )
             if (made instanceof THREE.DirectionalLight) {
-                // A distant light has no position, only a direction: put it far enough out to clear the scene.
+                // A distant light has no position, only a direction: aimShadow stands it off from the scene.
                 made.position.set(...(light.direction.map((value) => -value * 50) as [number, number, number]))
-                made.castShadow = light.shadow
                 if (light.shadow) {
-                    made.shadow.mapSize.set(2048, 2048)
-                    made.shadow.bias = -0.0005
-                    const box = made.shadow.camera
-                    box.left = box.bottom = -25
-                    box.right = box.top = 25
-                    box.near = 0.5
-                    box.far = 160
-                    box.updateProjectionMatrix()
+                    castsShadow(made, new THREE.Vector3(...light.direction))
+                    this.scene.add(made.target)
+                    this.#shadowCasters.push(made)
                 }
             } else {
                 made.position.set(...light.xyz)
@@ -352,6 +396,50 @@ export class Viewer {
             made.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(made)
             this.#sceneLights.push(made)
+        }
+        this.#shadowBounds = null
+        this.#fitShadows()
+        this.requestRender()
+    }
+
+    /**
+     * Point every shadow caster at what is drawn now.
+     *
+     * The meshes' own bounding boxes, not the points: a cloud reaches tens of metres past the walls and would
+     * blow the box up to where the room is a handful of texels across. Nothing happens unless the drawn meshes
+     * have grown outside the box already aimed at, so a scene that is only moving re-fits once and then stops.
+     */
+    #fitShadows(): void {
+        if (!this.#shadowCasters.length) {
+            return
+        }
+        const box = new THREE.Box3()
+        const own = new THREE.Box3()
+        this.scene.updateMatrixWorld()
+        this.scene.traverseVisible((object) => {
+            if (!isMesh(object) || isLineSegments2(object) || object.userData.noPick) {
+                return
+            }
+            const geometry = object.geometry as THREE.BufferGeometry | undefined
+            if (!geometry) {
+                return
+            }
+            if (!geometry.boundingBox) {
+                geometry.computeBoundingBox()
+            }
+            if (geometry.boundingBox) {
+                box.union(own.copy(geometry.boundingBox).applyMatrix4(object.matrixWorld))
+            }
+        })
+        if (box.isEmpty()) {
+            return
+        }
+        if (this.#shadowBounds?.containsBox(box)) {
+            return
+        }
+        this.#shadowBounds = box.clone()
+        for (const light of this.#shadowCasters) {
+            aimShadow(light, box)
         }
         this.requestRender()
     }
@@ -814,6 +902,11 @@ export class Viewer {
             return
         }
         this.#frameRequest = requestAnimationFrame(this.#loop)
+        // meshes arrive over tens of seconds, so the box they need is only known once they are in
+        if (now - this.#shadowFittedAt > SHADOW_REFIT_MS) {
+            this.#shadowFittedAt = now
+            this.#fitShadows()
+        }
         const dt = this.#lastFrame ? (now - this.#lastFrame) / 1000 : 0
         this.#lastFrame = now
         const reduced = !!this.#reducedMotion?.matches
