@@ -118,6 +118,8 @@ export class Viewer {
     /** the lighting a loaded scene asked for, which stands in for the defaults while it is there */
     #sceneLights: THREE.Light[] = []
     #look: DescriptionLook | null = null
+    #environment: THREE.Texture | null = null
+    #environmentFrom: THREE.Texture | null = null
     #shadowLamps: THREE.PointLight[] = []
     /** every light casting a shadow right now: their boxes are re-aimed as the drawn scene grows */
     #shadowCasters: THREE.DirectionalLight[] = []
@@ -327,7 +329,11 @@ export class Viewer {
         const renderer = this.renderer
         if (!renderer) return
         const curve = look?.toneMap
-        renderer.toneMapping = curve === "neutral"
+        renderer.toneMapping = curve === "agx"
+            // Blender's own default view transform, so a room graded to look right in Blender keeps
+            // looking right here. It holds saturation into the highlights where filmic bleaches them.
+            ? THREE.AgXToneMapping
+            : curve === "neutral"
             ? THREE.NeutralToneMapping
             : curve === "linear"
             ? THREE.LinearToneMapping
@@ -335,6 +341,27 @@ export class Viewer {
             ? THREE.NoToneMapping
             : THREE.ACESFilmicToneMapping
         renderer.toneMappingExposure = look?.exposure ?? DEFAULT_EXPOSURE
+        // The nearest thing this renderer has to Blender's irradiance volumes. Blender's rooms read
+        // right largely because light bounces; here nothing does, and a two-colour hemisphere is a poor
+        // stand-in -- it lights a face by which way it points and nothing else. Pre-filtering the dome's
+        // own sky into an environment map at least lights each face by what is actually above it.
+        //
+        // Pre-filtered, not handed over raw: three builds a PMREM from whatever is assigned here, and a
+        // raw strip made that fail. Generated once per sky and disposed with it.
+        const environment = look?.environmentIntensity
+        if (environment !== undefined && this.#sky) {
+            this.scene.environment = this.#environmentOf(this.#sky)
+            this.scene.environmentRotation.set(SKY_ROTATION_X, 0, 0)
+            this.scene.environmentIntensity = environment
+            for (const light of this.#sceneLights) {
+                if (light instanceof THREE.HemisphereLight) {
+                    light.intensity = 0
+                }
+            }
+        } else {
+            this.scene.environment = null
+            this.scene.environmentIntensity = 1
+        }
         const saturation = look?.saturation ?? 1
         const contrast = look?.contrast ?? 1
         const grade = []
@@ -512,11 +539,38 @@ export class Viewer {
         this.scene.backgroundRotation.set(SKY_ROTATION_X, 0, 0)
     }
 
+    /** The sky, pre-filtered into something a PBR material can be lit by. Cached per sky texture. */
+    #environmentOf(sky: THREE.Texture): THREE.Texture | null {
+        if (this.#environmentFrom === sky && this.#environment) {
+            return this.#environment
+        }
+        this.#environment?.dispose()
+        this.#environment = null
+        this.#environmentFrom = null
+        if (!this.renderer) {
+            return null
+        }
+        const pmrem = new THREE.PMREMGenerator(this.renderer)
+        try {
+            this.#environment = pmrem.fromEquirectangular(sky).texture
+            this.#environmentFrom = sky
+        } catch (error) {
+            console.warn("3D view: could not prefilter the sky for lighting", error)
+        } finally {
+            pmrem.dispose()
+        }
+        return this.#environment
+    }
+
     /** Back to the themed background (CSS behind the canvas), and let the texture go. */
     #clearSky() {
         if (!this.#sky) return
         this.scene.background = null
         this.scene.backgroundRotation.set(0, 0, 0)
+        this.scene.environment = null
+        this.#environment?.dispose()
+        this.#environment = null
+        this.#environmentFrom = null
         this.#sky.dispose()
         this.#sky = null
     }

@@ -810,6 +810,8 @@ function rotate(q: [number, number, number, number], v: [number, number, number]
 
 /** The tone curves a layer may name, mapped to what the viewer knows. */
 const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
+    // what Blender puts on by default, so a scene authored to look right there can ask for it by name
+    agx: "agx",
     neutral: "neutral",
     filmic: "filmic",
     aces: "filmic",
@@ -845,6 +847,7 @@ function lookOf(roots: Prim[]): DescriptionLook | undefined {
     const look: DescriptionLook = {
         toneMap: TONE_MAPS[named],
         exposure: number("exposure"),
+        environmentIntensity: number("environmentIntensity"),
         saturation: number("saturation"),
         contrast: number("contrast"),
     }

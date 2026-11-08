@@ -60,8 +60,10 @@ export interface DescriptionLight {
  * grade applied after that, which is the difference between a render and a plain rasterised frame.
  */
 export interface DescriptionLook {
-    toneMap?: "neutral" | "filmic" | "linear" | "none"
+    toneMap?: "agx" | "neutral" | "filmic" | "linear" | "none"
     exposure?: number
+    /** how strongly the dome's sky lights the room as an environment map (Blender's irradiance volumes, roughly) */
+    environmentIntensity?: number
     saturation?: number
     contrast?: number
 }

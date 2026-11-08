@@ -14,7 +14,10 @@ import * as THREE from "three"
 /** what `scene.backgroundRotation` has to be for the strip's top row to sit overhead in a Z-up world */
 export const SKY_ROTATION_X = Math.PI / 2
 
-/** the strip is 1 px wide: nothing varies with azimuth */
+/** nothing varies with azimuth, but the pre-filtering an environment map goes through needs more
+ * than one column to work from: a 1 px source makes a degenerate PMREM. 16 is still nothing to
+ * upload and is wide enough to filter. */
+const STRIP_WIDTH = 16
 const STRIP_HEIGHT = 256
 
 // A real sky is deep overhead and pale at the horizon, and what is below the horizon is ground, not
@@ -68,7 +71,7 @@ export function skyTexture(colour: THREE.Color, intensity: number): THREE.Canvas
     if (!canvas || !context) {
         return null
     }
-    canvas.width = 1
+    canvas.width = STRIP_WIDTH
     canvas.height = STRIP_HEIGHT
     const gradient = context.createLinearGradient(0, 0, 0, STRIP_HEIGHT)
     for (const stop of skyStops(colour, intensity)) {
