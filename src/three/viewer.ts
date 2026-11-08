@@ -17,8 +17,6 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 //
 // A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
 const DEFAULT_EXPOSURE = 1.1
-/** past this a room lamp's inverse-square share is a rounding error, and its unshadowed fill is not */
-const LAMP_CULL_METRES = 11
 const DISTANT_GAIN = 3
 // A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
 // on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
@@ -434,12 +432,11 @@ export class Viewer {
             .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
         const chosen = new Set(byRange.slice(0, MAX_SHADOW_LAMPS))
         for (const lamp of this.#shadowLamps) {
-            // A lamp that lights the floor but does not occlude fills in every shadow cast by the ones
-            // that do, so eighteen fittings with four casting can only ever darken a desk's floor by
-            // about four eighteenths -- which is a smudge, not a shadow. Past its reach a lamp's inverse
-            // square contribution is a rounding error anyway, so switching the far ones off costs almost
-            // no light and takes their fill with it, leaving the shadow to the lamps actually overhead.
-            lamp.visible = lamp.position.distanceTo(eye) <= LAMP_CULL_METRES || chosen.has(lamp)
+            // Every lamp stays lit. Switching the far ones off was tried, to stop them filling in the
+            // shadows the near ones cast, and it does deepen the shadow -- but a room is not dark where
+            // the camera is not, and it took a third of the light out with it. What actually matters is
+            // that the lamps overhead of whatever is being looked at are the ones casting; the rest are
+            // far enough that their inverse-square fill is small.
             const wanted = chosen.has(lamp)
             if (wanted === lamp.castShadow) {
                 continue
