@@ -356,7 +356,6 @@ export class Viewer {
         this.requestRender()
     }
 
-
     /** The sky a scene's dome light stands for: lighter at the horizon, deeper overhead.
      *
      * A flat fill reads as a wall rather than a sky, and the gradient is what tells you which way

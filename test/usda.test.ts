@@ -346,7 +346,9 @@ test("a room whose root is not a body still hangs off one frame", () => {
     // desk -- so the room drew as whatever was standing in it and nothing else.
     const description = parseUsda(room)
     assertEquals(description.base_link, "office")
-    const welds = description.joints.filter((each) => each.type === "fixed").map((each) => `${each.parent}->${each.child}`)
+    const welds = description.joints.filter((each) => each.type === "fixed").map((each) =>
+        `${each.parent}->${each.child}`
+    )
     assertEquals(welds.sort(), ["office->desk", "office->wall"])
     // each still at its own place, not stacked on the room's origin or on each other
     assertEquals(joint(description.joints, "desk_weld").origin.xyz, [2, 0, 0])
@@ -368,8 +370,8 @@ test("a link that has something to show keeps its colliders to itself", () => {
     // A collider only stands in where there is no visual at all. Given one, the desk shows that and nothing else.
     const withVisual = room.replace(
         '            def Cube "desk_hull" (',
-        '            def Cube "desk_visual"\n            {\n                double size = 1\n            }\n\n'
-            + '            def Cube "desk_hull" (',
+        '            def Cube "desk_visual"\n            {\n                double size = 1\n            }\n\n' +
+            '            def Cube "desk_hull" (',
     )
     const description = parseUsda(withVisual)
     const desk = description.links.find((link) => link.name === "desk")

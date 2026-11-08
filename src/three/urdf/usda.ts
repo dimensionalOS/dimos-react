@@ -18,7 +18,6 @@ import type {
     DescriptionLink,
     Origin,
     RobotDescription,
-    V3,
 } from "./description.ts"
 
 /** One prim: its type, its name, what it says about itself, and what is inside it. */
@@ -842,4 +841,3 @@ function compose(parent: Origin, child: Origin): Origin {
         quat: multiply(parent.quat, child.quat),
     }
 }
-
