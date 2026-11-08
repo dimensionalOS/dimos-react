@@ -57,3 +57,43 @@ export function textWidth(text: string, font: string): number {
     measurer.font = font
     return measurer.measureText(text).width
 }
+
+/** Where an edge's badge sits: the middle of the path flowPath / straightPath draws for it. */
+export function edgeMidpoint(
+    from: Placed,
+    to: Placed,
+    bends: Point[],
+    vertical: boolean,
+    layered: boolean,
+    port = 0,
+): Point {
+    if (!layered) {
+        const a = exit(from, to)
+        const b = exit(to, from)
+        return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    }
+    const a = side(from, true, vertical, port)
+    const b = side(to, false, vertical, port)
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    if (!bends.length) {
+        return mid
+    }
+    const track = bends.map((p) => (vertical ? p.x : p.y)).sort((m, n) => m - n)[Math.floor(bends.length / 2)]
+    return vertical ? { x: track, y: mid.y } : { x: mid.x, y: track }
+}
+
+/** An edge's key, for flashing it and for comments on it: `<from>><to>`. */
+export const edgeKey = (edge: { from: string; to: string }): string => `${edge.from}>${edge.to}`
+
+/**
+ * The background grid at zoom `k`: the cell (doubled until dots are at least `minGap` px apart, so a zoomed-out view
+ * thins them instead of packing them into a gray wash) and the dots' strength in percent (fading as you zoom out).
+ */
+export function gridAt(k: number, size: number, minGap = 14): { cell: number; strength: number } {
+    let cell = size * k
+    for (let i = 0; i < 12 && cell < minGap; i++) {
+        cell *= 2
+    }
+    const t = Math.max(0, Math.min(1, Math.log(k / 0.12) / Math.log(0.8 / 0.12)))
+    return { cell, strength: Math.round(12 + 23 * t) }
+}

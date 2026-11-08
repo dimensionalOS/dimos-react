@@ -110,6 +110,25 @@ test("STL meshes load, binary and ASCII", () => {
     assertThrows(() => meshGeometry("package://x/a.3ds", binaryStl()))
 })
 
+test("a Z_UP COLLADA mesh keeps its own axes, as a URDF link frame expects", () => {
+    const dae = `<?xml version="1.0"?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+  <asset><unit meter="1"/><up_axis>Z_UP</up_axis></asset>
+  <library_geometries><geometry id="g"><mesh>
+    <source id="p"><float_array id="pa" count="9">0 0 0 0.1 0 0 0 0 -0.2</float_array>
+      <technique_common><accessor source="#pa" count="3" stride="3"><param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/></accessor></technique_common></source>
+    <vertices id="v"><input semantic="POSITION" source="#p"/></vertices>
+    <triangles count="1"><input semantic="VERTEX" source="#v" offset="0"/><p>0 1 2</p></triangles>
+  </mesh></geometry></library_geometries>
+  <library_visual_scenes><visual_scene id="s"><node id="n"><instance_geometry url="#g"/></node></visual_scene></library_visual_scenes>
+  <scene><instance_visual_scene url="#s"/></scene>
+</COLLADA>`
+    const geometry = meshGeometry("package://x/calf.dae", new TextEncoder().encode(dae))
+    geometry.computeBoundingBox()
+    assertAlmostEquals(geometry.boundingBox!.min.z, -0.2, 1e-6)
+    assertAlmostEquals(geometry.boundingBox!.max.y, 0, 1e-6)
+})
+
 test("joint positions read back from link poses (TF)", () => {
     const kinematics = new Kinematics(parseUrdf(URDF))
     const poses = kinematics.linkPoses({ shoulder: 0.7, slide: 0.03 })

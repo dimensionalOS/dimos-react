@@ -79,26 +79,31 @@ const faceColors = () => {
     }
 }
 
-function faceTexture(label: string, colors: ReturnType<typeof faceColors>): THREE.CanvasTexture {
-    const size = 256
+function faceTexture(label: string, colors: ReturnType<typeof faceColors>, anisotropy: number): THREE.CanvasTexture {
+    // big enough that the face is drawn from it shrunk, never stretched, even supersampled on a 2x screen
+    const size = 512
     const canvas = document.createElement("canvas")
     canvas.width = canvas.height = size
     const context = canvas.getContext("2d")
     if (context) {
+        // the face a step lighter than the surface (so the cube stands off a dark scene), inside a dark border: two faces'
+        // borders meet in one thick dark line along each edge, flat (no lighter stroke to read as a gradient)
+        const border = 28
         context.fillStyle = colors.face
         context.fillRect(0, 0, size, size)
-        context.strokeStyle = colors.border
-        context.lineWidth = 10
-        context.strokeRect(5, 5, size - 10, size - 10)
+        context.globalAlpha = 0.16
+        context.fillStyle = colors.text
+        context.fillRect(border, border, size - 2 * border, size - 2 * border)
+        context.globalAlpha = 1
         context.fillStyle = colors.text
         context.textAlign = "center"
         context.textBaseline = "middle"
-        context.font = `600 ${label.length > 5 ? 50 : 58}px ${colors.font}`
-        context.fillText(label.toUpperCase(), size / 2, size / 2 + 2)
+        context.font = `700 ${label.length > 5 ? 100 : 116}px ${colors.font}`
+        context.fillText(label.toUpperCase(), size / 2, size / 2 + 4)
     }
     const texture = new THREE.CanvasTexture(canvas)
     texture.colorSpace = THREE.SRGBColorSpace
-    texture.anisotropy = 4
+    texture.anisotropy = anisotropy
     return texture
 }
 
@@ -106,12 +111,17 @@ export interface ViewCubeOptions {
     corner?: ViewCubeCorner
     /** CSS pixels */
     size?: number
+    /** drawn at this many times the screen's pixels and shrunk, so its edges and labels come out smooth */
+    supersample?: number
 }
 
 export class ViewCube {
     readonly canvas: HTMLCanvasElement
     #viewer: Viewer
     #renderer: THREE.WebGLRenderer
+    #size: number
+    #supersample: number
+    #densityQuery: MediaQueryList | null = null
     #scene = new THREE.Scene()
     #camera = new THREE.OrthographicCamera(-1.85, 1.85, 1.85, -1.85, 0.1, 50)
     #cube = new THREE.Group()
@@ -133,11 +143,16 @@ export class ViewCube {
     #offFrame: () => void
     #onTheme = () => this.setTheme()
 
-    constructor(viewer: Viewer, parent: HTMLElement, { corner = "top-right", size = 96 }: ViewCubeOptions = {}) {
+    constructor(
+        viewer: Viewer,
+        parent: HTMLElement,
+        { corner = "top-right", size = 96, supersample = 2 }: ViewCubeOptions = {},
+    ) {
         this.#viewer = viewer
+        this.#size = size
+        this.#supersample = supersample
         this.#renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-        this.#renderer.setPixelRatio(Math.min(2, globalThis.devicePixelRatio || 1))
-        this.#renderer.setSize(size, size)
+        this.#fitPixels()
         this.#renderer.setClearColor(0x000000, 0)
         this.canvas = this.#renderer.domElement
         this.canvas.className = `dr-scene-viewcube dr-scene-viewcube--${corner}`
@@ -158,6 +173,8 @@ export class ViewCube {
         }
         this.#highlight.visible = false
         this.#highlight.renderOrder = 2
+        // the faces draw their own thick borders: the 1 px GL edges would only blur them
+        this.#edges.visible = false
         this.#cube.add(this.#pickBox, this.#edges, this.#highlight)
         this.#scene.add(this.#cube)
         this.setTheme()
@@ -174,12 +191,27 @@ export class ViewCube {
         this.#sync()
     }
 
+    /** The canvas at the screen's current pixel density (times the supersampling); again whenever that changes (zoom, another screen). */
+    #fitPixels = () => {
+        const density = globalThis.devicePixelRatio || 1
+        this.#renderer.setPixelRatio(density * this.#supersample)
+        this.#renderer.setSize(this.#size, this.#size)
+        this.#densityQuery?.removeEventListener("change", this.#fitPixels)
+        this.#densityQuery = globalThis.matchMedia?.(`(resolution: ${density}dppx)`) ?? null
+        this.#densityQuery?.addEventListener("change", this.#fitPixels)
+        this.#dirty = true
+        if (this.#faces.length) {
+            this.#sync()
+        }
+    }
+
     /** Re-reads the theme's colors (faces, edges, hover). */
     setTheme() {
         const colors = faceColors()
+        const anisotropy = this.#renderer.capabilities.getMaxAnisotropy()
         for (const face of this.#faces) {
             face.material.map?.dispose()
-            face.material.map = faceTexture(face.userData.label, colors)
+            face.material.map = faceTexture(face.userData.label, colors, anisotropy)
             face.material.needsUpdate = true
         }
         this.#edges.material.color.set(colors.border)
@@ -298,6 +330,7 @@ export class ViewCube {
 
     dispose() {
         this.#offFrame()
+        this.#densityQuery?.removeEventListener("change", this.#fitPixels)
         removeEventListener("dimos-react-theme", this.#onTheme)
         this.canvas.removeEventListener("pointermove", this.#onMove)
         this.canvas.removeEventListener("pointerleave", this.#onLeave)

@@ -88,11 +88,12 @@ test("light and dark skins both exist (the components have rules for each)", () 
     assert(schemes.includes("light"))
 })
 
+// a relative color from a token (oklch(from var(--bg) …)) is the token, shifted: not a literal
 test("component CSS has no color literals: only Desktop's tokens", () => {
     const css = COMPONENT_CSS.replace(/\/\*[\s\S]*?\*\//g, "")
     const literals = [
         ...css.matchAll(
-            /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch|lab|lch)\(|(?<![\w-])(?:white|black|red|green|blue|gray|grey|orange|yellow|purple|pink)\b(?![\w-])/g,
+            /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch|lab|lch)\((?!from var\(--)|(?<![\w-])(?:white|black|red|green|blue|gray|grey|orange|yellow|purple|pink)\b(?![\w-])/g,
         ),
     ].map((match) => {
         const line = css.slice(0, match.index).split("\n").length

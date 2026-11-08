@@ -418,6 +418,18 @@ onLayoutChange })`, as a child, adds the zoom buttons and the layout picker.
 a Fullscreen button (the Fullscreen API, or a full-window overlay where it's refused; Esc leaves both). `rates` (Hz per
 topic) shows live topics flowing; `spot`, `onModule`, `onTopic` and `onHover` let a page drive the lighting.
 
+Uncontrolled, it starts on the layout the user picked last (`useGraphLayoutSetting()`: Desktop's UI setting
+`graphLayout`, else localStorage). A search box (top right; a magnifier on narrow screens) shows while the pointer moves
+and finds modules and topics. A ref adds `highlight(kind, id, times = 2)`, a soft flash; with `app="<desktop app>"` it
+also flashes what Desktop's `view-highlight` events name, and nodes and edges take comments (right click / long press →
+Comment, a badge where some are open, a thread with replies and Resolve; `commentSource(target)` attaches source code for
+the agent; `blueprintCommentSource(modules, read)` makes one that sends the module's Python class). `onViewChange({ visible: { modules, connections }, selected, layout })` reports what's on screen (debounced);
+`putView(app, state)` sends it to Desktop for agents.
+
+`dimos-react/comments` is that comment kit for any app: `commentsClient()` (list / create / reply / resolve / subscribe
+against `/gateways/desktop/comments`, quietly empty on a Desktop without them), `useComments(app, filter)`,
+`<CommentComposer>`, `<CommentThread>`, `<CommentBadge>`, and `desktopEvents(onEvent)` for Desktop's event stream.
+
 ## Installing
 
 - **No build (import map / esm.sh)** — the main path, as in the quick start:

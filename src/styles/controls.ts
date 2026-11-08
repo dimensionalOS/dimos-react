@@ -68,7 +68,9 @@ export const CONTROLS_CSS = /* css */ `
 .dr-field-control > .dr-input-wrap, .dr-field-control > .dr-select, .dr-field-control > .dr-textarea, .dr-field-control > .dr-slider { flex: 1; }
 .dr-field-hint { font-size: 12px; color: var(--muted-fg); }
 .dr-field-error { font-size: 12px; color: var(--danger); }
-.dr-field--inline { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; }
+.dr-field--inline { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; column-gap: 12px; }
+/* inline: a hint or error takes its own line under the label and control */
+.dr-field--inline > .dr-field-hint, .dr-field--inline > .dr-field-error { flex-basis: 100%; }
 .dr-field--inline > .dr-field-label { flex: 0 0 auto; min-width: 84px; }
 .dr-field--inline > .dr-field-control { flex: 1; justify-content: flex-end; }
 .dr-field--error .dr-input, .dr-field--error .dr-select { border-color: var(--danger); }
@@ -127,11 +129,12 @@ export const CONTROLS_CSS = /* css */ `
 }
 .dr-select option, .dr-select optgroup { background: var(--raised); color: var(--fg); }
 
-/* checkbox + radio: Research a filled box with a tick; Portal a hairline box with a glowing square */
+/* checkbox + radio: a filled accent box with a tick in --primary-fg (every skin); Portal radios a hairline ring */
 .dr-check { position: relative; display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-size: 14px; color: var(--fg); user-select: none; }
 :root[data-dr-dark] .dr-check { font-size: 13.5px; }
 .dr-check input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
 .dr-check-box {
+    --dr-tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.6 8.4l2.9 2.9 5.9-6.3' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
     width: 15px;
     height: 15px;
     flex: none;
@@ -148,31 +151,19 @@ export const CONTROLS_CSS = /* css */ `
 .dr-check input:checked + .dr-check-box { background: var(--primary); border-color: var(--primary); }
 .dr-check input:checked + .dr-check-box::after {
     content: "";
-    width: 4px;
-    height: 8px;
-    margin-top: -2px;
-    border: solid var(--primary-fg);
-    border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
+    width: 100%;
+    height: 100%;
+    background: var(--primary-fg);
+    -webkit-mask: var(--dr-tick) center / 100% 100% no-repeat;
+    mask: var(--dr-tick) center / 100% 100% no-repeat;
 }
 .dr-check input:indeterminate + .dr-check-box { background: var(--primary); border-color: var(--primary); }
-.dr-check input:indeterminate + .dr-check-box::after { content: ""; width: 8px; height: 2px; background: var(--primary-fg); }
+.dr-check input:indeterminate + .dr-check-box::after { content: ""; width: 8px; height: 2px; background: var(--primary-fg); -webkit-mask: none; mask: none; }
 .dr-radio input:checked + .dr-check-box { background: var(--input-bg); border-width: 4.5px; }
 .dr-radio input:checked + .dr-check-box::after { content: none; }
 .dr-check input:focus-visible + .dr-check-box { box-shadow: var(--dr-focus); border-color: var(--ring); }
 :root[data-dr-dark] .dr-check-box { width: 14px; height: 14px; border-color: var(--muted-fg); }
-:root[data-dr-dark] .dr-check input:checked + .dr-check-box,
-:root[data-dr-dark] .dr-check input:indeterminate + .dr-check-box { background: var(--input-bg); border: 1px solid var(--primary); }
-:root[data-dr-dark] .dr-check input:checked + .dr-check-box::after {
-    width: 6px;
-    height: 6px;
-    margin: 0;
-    border: 0;
-    transform: none;
-    background: var(--primary);
-    box-shadow: var(--glow);
-}
-:root[data-dr-dark] .dr-check input:indeterminate + .dr-check-box::after { background: var(--primary); }
+:root[data-dr-dark] .dr-radio input:checked + .dr-check-box { background: var(--input-bg); border: 1px solid var(--primary); }
 .dr-check--disabled { opacity: 0.5; cursor: not-allowed; }
 .dr-check-label { min-width: 0; }
 .dr-radio-group { display: flex; gap: 8px 16px; }

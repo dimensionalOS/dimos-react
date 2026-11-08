@@ -95,6 +95,15 @@ export const LAYOUT_CSS = /* css */ `
 .dr-disclosure__summary::-webkit-details-marker { display: none; }
 .dr-disclosure__summary::before { content: "▸ "; }
 .dr-disclosure[open] > .dr-disclosure__summary::before { content: "▾ "; }
+/* card: the border and corners live on the box itself, so the title row and the open body can never leave a gap between them */
+.dr-disclosure--card { border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--fg) 4%, var(--card, var(--surface))); overflow: hidden; }
+.dr-disclosure--card > .dr-disclosure__summary { display: flex; align-items: center; gap: 8px; min-height: 40px; box-sizing: border-box; margin: 0; padding: 0 12px;
+    color: var(--fg); letter-spacing: 0; text-transform: none; font-size: 13px; font-weight: 500; }
+.dr-disclosure--card > .dr-disclosure__summary:hover { background: var(--hover, color-mix(in srgb, var(--fg) 6%, transparent)); }
+.dr-disclosure--card > .dr-disclosure__summary::before, .dr-disclosure--card[open] > .dr-disclosure__summary::before { content: none; }
+.dr-disclosure--card > .dr-disclosure__summary::after { content: "›"; margin-left: auto; color: var(--muted-fg); font-size: 17px; transition: transform 120ms; }
+.dr-disclosure--card[open] > .dr-disclosure__summary::after { transform: rotate(90deg); }
+.dr-disclosure--card[open] > .dr-disclosure__summary { border-bottom: 1px solid var(--border); }
 .dr-disclosure__count { margin-left: 4px; color: var(--muted-fg); letter-spacing: 0; text-transform: none; }
 .dr-toolbar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .dr-toolbar--vertical { flex-direction: column; flex-wrap: nowrap; }

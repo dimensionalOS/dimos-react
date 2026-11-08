@@ -422,7 +422,7 @@ export interface SpinnerProps extends HTMLAttributes<HTMLSpanElement> {
     label?: string
 }
 
-/** A spinning ring; `label` for screen readers. */
+/** A ring (a square in a square skin) whose highlight walks its edges; `label` for screen readers. */
 export function Spinner({ size = 18, label = "Loading", className, ...rest }: SpinnerProps) {
     return (
         <span

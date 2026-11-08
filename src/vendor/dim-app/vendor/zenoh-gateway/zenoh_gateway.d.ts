@@ -51,6 +51,26 @@ export interface VideoFrameInfo {
      * the message's `timestamp`); absent from gateways before 0.5.20 */
     receivedMs?: number;
     encodedMs?: number;
+    /** the picture's message header (its `stamp`, seconds, and `frameId`, the TF frame it was taken in), when the
+     * encoding gave one (e.g. zenoh-dimos-codecs' image codecs); absent from gateways before 0.5.31 */
+    stamp?: number;
+    frameId?: string;
+    /** the same header whole (exact `sec`/`nanosec`, `seq`), as `msg.header` carries it */
+    header?: MessageHeader;
+    /** the picture's zenoh sample encoding and attachment, when they say something (0.5.32+; also `msg.encoding` / `msg.attachment`) */
+    encoding?: string;
+    attachment?: Uint8Array;
+}
+/** A message's own header (ROS `std_msgs/Header`, dimos LCM's), which the gateway sends with what an encoding made of it. */
+export interface MessageHeader {
+    /** seconds since the epoch (to about a microsecond; `sec` + `nanosec` are exact) */
+    stamp: number;
+    sec: number;
+    nanosec: number;
+    /** the TF frame it was taken in */
+    frameId: string;
+    /** its sequence number, where the type has one (dimos LCM does, ROS 2 doesn't) */
+    seq?: number;
 }
 /** Percentiles of one latency, ms. */
 export interface LatencySpread {
@@ -86,9 +106,9 @@ export interface Message {
     kind: "put" | "delete";
     /** the payload (decompressed): raw sample bytes, or the encoding's output */
     bytes: Uint8Array;
-    /** the sample's encoding, when not the default (raw messages only) */
+    /** the sample's zenoh encoding, when not the default (raw messages; encoded ones with `header`, 0.5.32+) */
     encoding?: string;
-    /** the sample's attachment (raw messages only) */
+    /** the sample's zenoh attachment (raw messages; encoded ones with `header`, 0.5.32+) */
     attachment?: Uint8Array;
     timestamp: number;
     seq: number;
@@ -96,6 +116,9 @@ export interface Message {
     decoded?: unknown;
     video?: VideoFrameInfo;
     mediaStream?: MediaStream;
+    /** the sample's own header (stamp, frameId, seq) on encoded messages of any channel, unless the subscription says
+     * `metadata: false` (raw messages are the whole sample, header and all); absent from gateways before 0.5.32 but on video */
+    header?: MessageHeader;
 }
 export interface SubscribeOptions {
     delivery?: Delivery;
@@ -135,6 +158,9 @@ export interface SubscribeOptions {
     targetQp?: number;
     /** video channels: [min, max] ms the browser may hold a frame to smooth out jitter (default [0, 0]: show at once) */
     playoutDelay?: [number, number];
+    /** each encoded message comes with its sample's own header (`msg.header`: stamp, frameId, seq), default true; false
+     * saves its few bytes a message when nothing reads where or when it was taken. Gateways before 0.5.32 ignore it. */
+    metadata?: boolean;
 }
 /** What `Subscription.update` may change on a running subscription; `null` puts an option back to its default. */
 export type SubscriptionUpdate = {
@@ -253,8 +279,18 @@ export type FieldValue = number | string | Uint8Array | Int8Array | Uint16Array 
  * fields strings, others typed arrays viewing the message (copied once if misaligned).
  */
 export declare function decodeFields(message: Uint8Array): Record<string, FieldValue>;
-/** Video metadata frame (28 bytes) sent on a video subscription's channel per frame. */
+/** Video metadata frame (64 bytes, then the picture's header if flags bit2) sent on a video subscription's channel per frame. */
 export declare function decodeVideoFrameInfo(bytes: Uint8Array): VideoFrameInfo;
+/** A message's header with its zenoh sample's encoding and attachment, when they came. */
+export interface DecodedHeader {
+    header: MessageHeader;
+    encoding?: string;
+    attachment?: Uint8Array;
+}
+/** A message header as the gateway sends it: `f64 stamp | u16 frameIdLen | frameId | i32 sec | u32 nanosec | u8 flags |
+ * u32 seq`, flags bit0: seq is set, bit1: `u16 encodingLen | encoding | u32 attachmentLen | attachment` (the zenoh
+ * sample's) follow; 0.5.31 sent only up to frameId. Undefined if it is cut short. */
+export declare function decodeHeader(bytes: Uint8Array): DecodedHeader | undefined;
 /** Browser -> gateway put: f64 sentAtMs (browser clock) | payload (little endian). */
 export declare function encodePut(payload: Uint8Array, sentAtMs: number): Uint8Array<ArrayBuffer>;
 /**
@@ -317,6 +353,9 @@ export declare class Subscription extends Endpoint {
      * clock sync brings to this clock. Read it with `videoLatency()`; returns a function that stops measuring.
      */
     watchVideoLatency(element: HTMLVideoElement): () => void;
+    /** The metadata of the frame a video element shows (a requestVideoFrameCallback's `rtpTimestamp`), e.g. its `stamp`
+     * and `frameId` to place the picture on screen in its own TF frame; undefined if it is not among the latest 512. */
+    videoFrameInfo(rtpTimestamp: number): VideoFrameInfo | undefined;
     /** End-to-end latency of the frames a watched video element showed lately (see `watchVideoLatency`): its latest 300,
      * or those of the last `windowMs`; null before any. */
     videoLatency(windowMs?: number): VideoLatency | null;
@@ -410,6 +449,8 @@ export declare class ZenohGateway {
     congestion: Congestion | null;
     /** the message encodings the gateway runs, fetched on connect */
     encodings: readonly EncodingInfo[];
+    /** what the gateway supports beyond 0.5.31 (e.g. "metadata": the subscribe option), fetched with the encodings */
+    features: readonly string[];
     /** the ICE servers in use (the gateway's unless given) */
     iceServers: RTCIceServer[];
     /** leases held, by group */

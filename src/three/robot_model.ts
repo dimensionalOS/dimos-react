@@ -24,11 +24,13 @@ type Vec3 = [number, number, number]
 /** A CSS color (or a token like "var(--primary)") as a THREE.Color; `fallback` when it can't be resolved. */
 export function cssColor(value: string | null | undefined, fallback = "#888888"): THREE.Color {
     let text = value
-    if (typeof value === "string" && value.startsWith("var(") && typeof document !== "undefined") {
-        const name = value.slice(4, -1).split(",")[0].trim()
-        text = getComputedStyle(document.body ?? document.documentElement)
-            .getPropertyValue(name)
-            .trim()
+    // var(--a, <fallback>): --a's value, else the fallback (itself possibly another var(...))
+    while (typeof text === "string" && text.startsWith("var(") && typeof document !== "undefined") {
+        const inner = text.slice(4, -1)
+        const comma = inner.indexOf(",")
+        const name = (comma < 0 ? inner : inner.slice(0, comma)).trim()
+        text = getComputedStyle(document.body ?? document.documentElement).getPropertyValue(name).trim() ||
+            (comma < 0 ? "" : inner.slice(comma + 1).trim())
     }
     const color = new THREE.Color()
     try {

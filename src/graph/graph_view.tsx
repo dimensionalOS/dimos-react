@@ -16,7 +16,7 @@ import {
 import type { CSSProperties, ForwardedRef, ReactNode, Ref } from "react"
 import { cx } from "../cx.ts"
 import { type Box, layout, type LayoutId, type Link, type Placement } from "./layout.ts"
-import { flowPath, type Placed, straightPath } from "./paths.ts"
+import { edgeKey, edgeMidpoint, flowPath, gridAt, type Placed, straightPath } from "./paths.ts"
 
 export interface GraphViewHandle {
     zoom(factor: number, cx?: number, cy?: number): void
@@ -24,6 +24,16 @@ export interface GraphViewHandle {
     fit(): void
     /** Scroll a node into view, animated, if it isn't already. */
     reveal(id: string): void
+    /** Pan a node to the middle of the view, animated. */
+    center(id: string): void
+    /** Softly flash a node (its id) or an edge (`edgeKey`: `<from>><to>`), `times` pulses (default 2). */
+    flash(id: string, times?: number): void
+}
+
+/** A point on the page (client coordinates), where a menu or card opens. */
+export interface ScreenPoint {
+    x: number
+    y: number
 }
 
 export interface GraphViewProps<N extends Box, E extends Link> {
@@ -42,6 +52,16 @@ export interface GraphViewProps<N extends Box, E extends Link> {
     onNodeClick?: (node: N) => void
     onBackgroundClick?: () => void
     onHover?: (node: N | null) => void
+    /** Right click (or a long press) on a node. */
+    onNodeContextMenu?: (node: N, at: ScreenPoint) => void
+    /** Right click (or a long press) on an edge (a wider invisible stroke catches it). */
+    onEdgeContextMenu?: (edge: E, index: number, at: ScreenPoint) => void
+    /** A click on an element you drew with `data-graph-badge="<key>"` (not a node click). */
+    onBadgeClick?: (badge: string, at: ScreenPoint) => void
+    /** Drawn at an edge's middle (graph coordinates), above the nodes: e.g. a comment badge. */
+    edgeDecoration?: (edge: E, index: number, at: { x: number; y: number }) => ReactNode
+    /** The ids of the nodes on screen, after each pan, zoom or layout (often: debounce it). */
+    onViewport?: (visible: string[]) => void
     /** Called after every layout, e.g. to check for overlaps. */
     onLayout?: (placement: Placement) => void
     /** Room edges leave at a node's sides (e.g. for port markers you draw). */
@@ -67,6 +87,8 @@ interface View {
 }
 
 const clampScale = (k: number) => Math.max(0.1, Math.min(4, k))
+/** One flash pulse (styles/graph.ts's animation runs this long). */
+const FLASH_MS = 900
 
 function GraphViewInner<N extends Box, E extends Link>(
     props: GraphViewProps<N, E>,
@@ -92,6 +114,10 @@ function GraphViewInner<N extends Box, E extends Link>(
         fitMinScale = { hierarchy: 0.8 },
         gridSize = 22,
         focus = null,
+        onNodeContextMenu,
+        onEdgeContextMenu,
+        edgeDecoration,
+        onViewport,
     } = props
     const pane = useRef<HTMLDivElement>(null)
     const svg = useRef<SVGSVGElement>(null)
@@ -184,7 +210,66 @@ function GraphViewInner<N extends Box, E extends Link>(
         [byId],
     )
 
-    useImperativeHandle(ref, () => ({ zoom, fit, reveal }), [zoom, fit, reveal])
+    const center = useCallback(
+        (id: string) => {
+            const node = byId.get(id)
+            const box = pane.current?.getBoundingClientRect()
+            if (!node || !box || box.width < 10) {
+                return
+            }
+            const from = viewRef.current
+            const k = Math.max(from.k, 0.8)
+            const to = { x: box.width / 2 - node.x * k, y: box.height / 2 - node.y * k }
+            const start = performance.now()
+            const step = (now: number) => {
+                const t = Math.min((now - start) / 320, 1)
+                const ease = 1 - (1 - t) ** 3
+                setView({
+                    k: from.k + (k - from.k) * ease,
+                    x: from.x + (to.x - from.x) * ease,
+                    y: from.y + (to.y - from.y) * ease,
+                })
+                if (t < 1) {
+                    requestAnimationFrame(step)
+                }
+            }
+            moved.current = true
+            requestAnimationFrame(step)
+        },
+        [byId],
+    )
+
+    // what's flashing: id → a count that alternates the animation's name, so a flash again restarts it
+    const [flashing, setFlashing] = useState<Map<string, { times: number; turn: number }>>(new Map())
+    const flashTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
+    const flash = useCallback((id: string, times = 2) => {
+        const pulses = Math.max(1, Math.min(10, Math.round(times)))
+        setFlashing((was) => new Map(was).set(id, { times: pulses, turn: (was.get(id)?.turn ?? 0) + 1 }))
+        clearTimeout(flashTimers.current.get(id))
+        flashTimers.current.set(
+            id,
+            setTimeout(() => {
+                flashTimers.current.delete(id)
+                setFlashing((was) => {
+                    const next = new Map(was)
+                    next.delete(id)
+                    return next
+                })
+            }, pulses * FLASH_MS + 50),
+        )
+    }, [])
+    useEffect(() => () => flashTimers.current.forEach((timer) => clearTimeout(timer)), [])
+    const flashProps = (id: string) => {
+        const on = flashing.get(id)
+        return on
+            ? {
+                className: `flash flash-${on.turn % 2}`,
+                style: { "--dr-graph-flash-times": on.times } as CSSProperties,
+            }
+            : null
+    }
+
+    useImperativeHandle(ref, () => ({ zoom, fit, reveal, center, flash }), [zoom, fit, reveal, center, flash])
 
     useLayoutEffect(() => {
         onLayout?.(placement)
@@ -197,8 +282,22 @@ function GraphViewInner<N extends Box, E extends Link>(
         return () => observer.disconnect()
     }, [fit])
 
-    const handlers = useRef({ onNodeClick, onBackgroundClick, onHover })
-    handlers.current = { onNodeClick, onBackgroundClick, onHover }
+    const handlers = useRef({
+        onNodeClick,
+        onBackgroundClick,
+        onHover,
+        onNodeContextMenu,
+        onEdgeContextMenu,
+        onBadgeClick: props.onBadgeClick,
+    })
+    handlers.current = {
+        onNodeClick,
+        onBackgroundClick,
+        onHover,
+        onNodeContextMenu,
+        onEdgeContextMenu,
+        onBadgeClick: props.onBadgeClick,
+    }
     const nodeAt = useCallback(
         (target: EventTarget | null): N | null => {
             const element = (target as Element | null)?.closest?.("[data-graph-node]")
@@ -206,6 +305,27 @@ function GraphViewInner<N extends Box, E extends Link>(
             return id ? (nodes.find((node) => node.id === id) ?? null) : null
         },
         [nodes],
+    )
+    // a right click / long press: on an edge's hit stroke, else a node; true when someone took it
+    const menuAt = useCallback(
+        (target: EventTarget | null, at: ScreenPoint): boolean => {
+            const hit = (target as Element | null)?.closest?.("[data-graph-edge]")
+            if (hit) {
+                const index = Number(hit.getAttribute("data-graph-edge"))
+                const edge = edges[index]
+                if (edge && handlers.current.onEdgeContextMenu) {
+                    handlers.current.onEdgeContextMenu(edge, index, at)
+                    return true
+                }
+            }
+            const node = nodeAt(target)
+            if (node && handlers.current.onNodeContextMenu) {
+                handlers.current.onNodeContextMenu(node, at)
+                return true
+            }
+            return false
+        },
+        [edges, nodeAt],
     )
 
     useEffect(() => {
@@ -225,6 +345,9 @@ function GraphViewInner<N extends Box, E extends Link>(
         const touches = new Map<number, { x: number; y: number }>()
         let drag: { x: number; y: number; at: View; far: boolean } | null = null
         let pinch: { gap: number; x: number; y: number; at: View } | null = null
+        // a touch held still opens the context menu (iOS fires no contextmenu); a native one right after is the same
+        let press: ReturnType<typeof setTimeout> | undefined
+        let pressedAt = 0
         const twoFingers = () => {
             const [a, b] = [...touches.values()]
             const box = pane.current!.getBoundingClientRect()
@@ -235,6 +358,19 @@ function GraphViewInner<N extends Box, E extends Link>(
             }
         }
         const onDown = (event: PointerEvent) => {
+            if (event.pointerType === "mouse" && event.button !== 0) {
+                return
+            }
+            clearTimeout(press)
+            if (event.pointerType === "touch") {
+                const { target, clientX, clientY } = event
+                press = setTimeout(() => {
+                    if (drag && !drag.far && touches.size === 1 && menuAt(target, { x: clientX, y: clientY })) {
+                        pressedAt = performance.now()
+                        drag = null
+                    }
+                }, 550)
+            }
             touches.set(event.pointerId, { x: event.clientX, y: event.clientY })
             if (touches.size === 2) {
                 pinch = { ...twoFingers(), at: viewRef.current }
@@ -264,17 +400,20 @@ function GraphViewInner<N extends Box, E extends Link>(
                 return
             }
             drag.far = true
+            clearTimeout(press)
             element.classList.add("panning")
             moved.current = true
             setView({ ...drag.at, x: drag.at.x + dx, y: drag.at.y + dy })
         }
         const onCancel = (event: PointerEvent) => {
+            clearTimeout(press)
             touches.delete(event.pointerId)
             pinch = null
             drag = null
             element.classList.remove("panning")
         }
         const onUp = (event: PointerEvent) => {
+            clearTimeout(press)
             touches.delete(event.pointerId)
             if (pinch) {
                 pinch = touches.size ? pinch : null
@@ -284,27 +423,46 @@ function GraphViewInner<N extends Box, E extends Link>(
             drag = null
             element.classList.remove("panning")
             if (was && !was.far) {
+                const badge = (event.target as Element | null)?.closest?.("[data-graph-badge]")
                 const node = nodeAt(event.target)
-                if (node) {
+                if (badge && handlers.current.onBadgeClick) {
+                    handlers.current.onBadgeClick(badge.getAttribute("data-graph-badge")!, {
+                        x: event.clientX,
+                        y: event.clientY,
+                    })
+                } else if (node) {
                     handlers.current.onNodeClick?.(node)
                 } else if ((event.target as Element | null)?.closest?.("svg") === element) {
                     handlers.current.onBackgroundClick?.()
                 }
             }
         }
+        const onContextMenu = (event: MouseEvent) => {
+            if (performance.now() - pressedAt < 900) {
+                event.preventDefault()
+                return
+            }
+            if (menuAt(event.target, { x: event.clientX, y: event.clientY })) {
+                event.preventDefault()
+                drag = null
+            }
+        }
         element.addEventListener("wheel", onWheel, { passive: false })
+        element.addEventListener("contextmenu", onContextMenu)
         element.addEventListener("pointerdown", onDown)
         addEventListener("pointermove", onMove)
         addEventListener("pointercancel", onCancel)
         addEventListener("pointerup", onUp)
         return () => {
+            clearTimeout(press)
             element.removeEventListener("wheel", onWheel)
+            element.removeEventListener("contextmenu", onContextMenu)
             element.removeEventListener("pointerdown", onDown)
             removeEventListener("pointermove", onMove)
             removeEventListener("pointercancel", onCancel)
             removeEventListener("pointerup", onUp)
         }
-    }, [zoom, nodeAt])
+    }, [zoom, nodeAt, menuAt])
 
     const lit = useMemo(() => {
         const ids = new Set(focus && byId.has(focus) ? [focus] : [])
@@ -330,29 +488,39 @@ function GraphViewInner<N extends Box, E extends Link>(
                         const d = layered
                             ? flowPath(from, to, placement.routes.get(index) ?? [], !!placement.vertical, port)
                             : straightPath(from, to)
+                        const flashed = flashProps(edgeKey(edge))
                         return (
-                            <path
-                                key={index}
-                                className={cx(
-                                    "edge",
-                                    focus && (edge.from === focus || edge.to === focus) && "lit",
-                                    edgeClassName?.(edge, index),
-                                )}
-                                style={edgeStyle?.(edge, index)}
-                                d={d}
-                                markerEnd={`url(#${arrow})`}
-                            />
+                            <g key={index}>
+                                <path
+                                    className={cx(
+                                        "edge",
+                                        focus && (edge.from === focus || edge.to === focus) && "lit",
+                                        edgeClassName?.(edge, index),
+                                        flashed?.className,
+                                    )}
+                                    style={{ ...edgeStyle?.(edge, index), ...flashed?.style }}
+                                    d={d}
+                                    markerEnd={`url(#${arrow})`}
+                                />
+                                {onEdgeContextMenu && <path className="edge-hit" d={d} data-graph-edge={index} />}
+                            </g>
                         )
                     })}
                 </g>
                 <g className="nodes">
                     {placed.map((node) => {
                         const title = nodeTitle?.(node)
+                        const flashed = flashProps(node.id)
                         return (
                             <g
                                 key={node.id}
-                                className={cx("node", lit.has(node.id) && "lit", nodeClassName?.(node))}
-                                style={nodeStyle?.(node)}
+                                className={cx(
+                                    "node",
+                                    lit.has(node.id) && "lit",
+                                    nodeClassName?.(node),
+                                    flashed?.className,
+                                )}
+                                style={{ ...nodeStyle?.(node), ...flashed?.style }}
                                 transform={`translate(${node.x - node.w / 2} ${node.y - node.h / 2})`}
                                 tabIndex={focusable?.(node) ? 0 : -1}
                                 data-graph-node={node.id}
@@ -363,6 +531,19 @@ function GraphViewInner<N extends Box, E extends Link>(
                         )
                     })}
                 </g>
+                {edgeDecoration && (
+                    <g className="edge-decorations">
+                        {edges.map((edge, index) => {
+                            const from = byId.get(edge.from)
+                            const to = byId.get(edge.to)
+                            const bends = placement.routes.get(index) ?? []
+                            const at = from && to &&
+                                edgeMidpoint(from, to, bends, !!placement.vertical, layered, port)
+                            const drawn = at ? edgeDecoration(edge, index, at) : null
+                            return drawn ? <g key={index}>{drawn}</g> : null
+                        })}
+                    </g>
+                )}
             </>
         ),
         [
@@ -382,9 +563,30 @@ function GraphViewInner<N extends Box, E extends Link>(
             edgeStyle,
             focus,
             lit,
+            flashing,
+            onEdgeContextMenu,
+            edgeDecoration,
         ],
     )
-    const grid = gridSize * view.k
+
+    // the nodes on screen, for whoever reports what the user sees
+    useEffect(() => {
+        const box = pane.current?.getBoundingClientRect()
+        if (!onViewport || !box || box.width < 10) {
+            return
+        }
+        const { x, y, k } = view
+        onViewport(
+            placed
+                .filter((node) =>
+                    x + (node.x + node.w / 2) * k > 0 && x + (node.x - node.w / 2) * k < box.width &&
+                    y + (node.y + node.h / 2) * k > 0 && y + (node.y - node.h / 2) * k < box.height
+                )
+                .map((node) => node.id),
+        )
+    }, [view, placed, onViewport])
+
+    const { cell: grid, strength: dots } = gridAt(view.k, gridSize)
     return (
         <div
             ref={pane}
@@ -393,7 +595,8 @@ function GraphViewInner<N extends Box, E extends Link>(
                 ...props.style,
                 backgroundSize: `${grid}px ${grid}px`,
                 backgroundPosition: `${view.x}px ${view.y}px`,
-            }}
+                "--dr-graph-dots": `${dots}%`,
+            } as CSSProperties}
         >
             <svg
                 ref={svg}

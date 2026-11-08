@@ -1,12 +1,13 @@
 {
     "name": "@robotics/dimos-react",
-    "version": "0.3.3",
+    "version": "0.3.14",
     "license": "MIT",
     "nodeModulesDir": "auto",
     "exports": {
         ".": "./src/index.ts",
         "./three": "./src/three.ts",
         "./graph": "./src/graph.ts",
+        "./comments": "./src/comments.ts",
         "./dim-app/desktop.js": "./src/vendor/dim-app/desktop.js",
         "./dim-app/events.js": "./src/vendor/dim-app/events.js",
         "./dim-app/notify.js": "./src/vendor/dim-app/notify.js",
@@ -17,7 +18,7 @@
         "dev": "deno run -A npm:vite --config vite.demo.config.ts",
         "build:demo": "deno run -A npm:vite build --config vite.demo.config.ts",
         "test": "deno run -A npm:vitest run",
-        "check": "deno check src/index.ts src/three.ts src/graph.ts test/ demo/ tools/ vite.demo.config.ts vitest.config.ts",
+        "check": "deno check src/index.ts src/three.ts src/graph.ts src/comments.ts test/ demo/ tools/ vite.demo.config.ts vitest.config.ts",
         "lint": "deno lint && deno fmt --check",
         "fmt": "deno fmt && deno lint --fix",
         "sync-tokens": "deno run --allow-net --allow-read --allow-write=src/theme/tokens.ts tools/sync_tokens.ts",

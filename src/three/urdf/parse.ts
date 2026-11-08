@@ -208,6 +208,8 @@ export function meshGeometry(uri: string, data: Uint8Array): THREE.BufferGeometr
         if (!collada) {
             throw new Error("not a COLLADA file")
         }
+        // ColladaLoader turns a Z_UP file Y-up for three; a URDF's link frames are already Z-up.
+        collada.scene.rotation.set(0, 0, 0)
         geometry = mergedMeshes(collada.scene)
     } else {
         throw new Error(`unsupported mesh format .${extension}`)

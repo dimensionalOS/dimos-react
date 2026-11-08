@@ -178,6 +178,7 @@ export function PointLookEditor({ look, onChange }: PointLookEditorProps) {
                         ["intensity", "by intensity"],
                         ["range", "by distance"],
                         ["solid", "solid"],
+                        ["glass", "glass"],
                     ]}
                     onChange={(colorMode) => set({ colorMode })}
                 />
@@ -190,7 +191,7 @@ export function PointLookEditor({ look, onChange }: PointLookEditorProps) {
                 )
                 : [
                     <GradientPicker key="gradients" value={look.gradient} onChange={(gradient) => set({ gradient })} />,
-                    look.colorMode === "height"
+                    look.colorMode === "height" || look.colorMode === "glass"
                         ? (
                             <Field label="Axis" key="axis">
                                 <Select<0 | 1 | 2>

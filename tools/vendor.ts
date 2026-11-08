@@ -3,7 +3,7 @@ import { parse as parseJsonc } from "jsr:@std/jsonc@1"
 // Copies dim-app's zenoh client (and its gateway client) and the Controller's LCM schemas into src/vendor.
 const home = Deno.env.get("HOME")
 const dimApp = Deno.env.get("DIM_APP") ?? `${home}/repos/dim-app`
-const tag = Deno.args[0] ?? "v0.23.2"
+const tag = Deno.args[0] ?? "v0.25.1"
 
 function run(command: string, args: string[], cwd?: string): Uint8Array {
     const { success, stdout, stderr } = new Deno.Command(command, { args, cwd, stderr: "piped" }).outputSync()

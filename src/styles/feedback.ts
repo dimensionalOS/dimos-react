@@ -113,7 +113,17 @@ export const FEEDBACK_CSS = /* css */ `
     border: 2px solid var(--border);
     border-top-color: var(--primary);
     border-radius: 50%;
-    animation: dr-spin 0.8s linear infinite;
+    animation: dr-edges 1.2s linear infinite;
+}
+/* it doesn't turn (a square one, in a square skin, wobbled): the highlight walks its edges, top → right → bottom → left */
+@keyframes dr-edges {
+    0%, 100% { border-color: var(--primary) var(--border) var(--border) var(--border); }
+    25% { border-color: var(--border) var(--primary) var(--border) var(--border); }
+    50% { border-color: var(--border) var(--border) var(--primary) var(--border); }
+    75% { border-color: var(--border) var(--border) var(--border) var(--primary); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .dr-spinner { animation-name: none !important; }
 }
 .dr-spinner--inline { width: 13px; height: 13px; border-width: 2px; }
 .dr-progress { position: relative; height: 4px; width: 100%; overflow: hidden; border-radius: var(--radius-pill); background: var(--track); --dr-tone: var(--primary); }

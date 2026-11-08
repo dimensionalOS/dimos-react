@@ -15,3 +15,7 @@ test("three exports the v0.1 API", async () => {
 test("graph exports the graph view", async () => {
     assertEquals(Object.keys(await import("../src/graph.ts")).sort(), expected.graph)
 })
+
+test("comments exports the comments client and UI", async () => {
+    assertEquals(Object.keys(await import("../src/comments.ts")).sort(), expected.comments)
+})

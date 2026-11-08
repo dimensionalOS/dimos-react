@@ -81,6 +81,7 @@ export const ICONS = {
     wifi: "M2 9a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h.01",
     battery: "M3 8h15v8H3zM21 11v2M6 11v2",
     bell: "M6 16V11a6 6 0 1 1 12 0v5l2 2H4l2-2Zm4 4h4",
+    comment: "M4 5h16v11H9l-5 4V5Z",
     send: "M4 12 20 4l-6 16-3-7-7-1Z",
     save: "M5 4h11l3 3v13H5V4Zm3 0v5h7V4M8 20v-6h8v6",
     lock: "M6 11h12v9H6zM8 11V8a4 4 0 1 1 8 0v3",

@@ -147,6 +147,8 @@ export interface DisclosureProps extends Omit<HTMLAttributes<HTMLDetailsElement>
     defaultOpen?: boolean
     /** remembers the open state (localStorage) under this key */
     persistKey?: string
+    /** "card": one rounded, bordered box holding the title row and (open) the body, chevron on the right */
+    variant?: "plain" | "card"
 }
 
 /** A section that folds under its label (▸ / ▾), remembering whether it's open with `persistKey`. */
@@ -155,6 +157,7 @@ export function Disclosure({
     count,
     defaultOpen = true,
     persistKey,
+    variant = "plain",
     className,
     children,
     ...rest
@@ -162,7 +165,7 @@ export function Disclosure({
     const [open, setOpen] = usePersistentState(persistKey ?? "dr.disclosure.__unsaved", defaultOpen)
     return (
         <details
-            className={cx("dr-disclosure", className)}
+            className={cx("dr-disclosure", variant === "card" && "dr-disclosure--card", className)}
             open={open}
             onToggle={(event) => setOpen(event.currentTarget.open)}
             {...rest}
