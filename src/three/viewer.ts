@@ -17,6 +17,8 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 //
 // A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
 const DEFAULT_EXPOSURE = 1.1
+/** past this a room lamp's inverse-square share is a rounding error, and its unshadowed fill is not */
+const LAMP_CULL_METRES = 11
 const DISTANT_GAIN = 3
 // A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
 // on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
@@ -428,11 +430,16 @@ export class Viewer {
             return
         }
         const eye = this.camera.position
-        const nearest = [...this.#shadowLamps]
+        const byRange = [...this.#shadowLamps]
             .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
-            .slice(0, MAX_SHADOW_LAMPS)
-        const chosen = new Set(nearest)
+        const chosen = new Set(byRange.slice(0, MAX_SHADOW_LAMPS))
         for (const lamp of this.#shadowLamps) {
+            // A lamp that lights the floor but does not occlude fills in every shadow cast by the ones
+            // that do, so eighteen fittings with four casting can only ever darken a desk's floor by
+            // about four eighteenths -- which is a smudge, not a shadow. Past its reach a lamp's inverse
+            // square contribution is a rounding error anyway, so switching the far ones off costs almost
+            // no light and takes their fill with it, leaving the shadow to the lamps actually overhead.
+            lamp.visible = lamp.position.distanceTo(eye) <= LAMP_CULL_METRES || chosen.has(lamp)
             const wanted = chosen.has(lamp)
             if (wanted === lamp.castShadow) {
                 continue
