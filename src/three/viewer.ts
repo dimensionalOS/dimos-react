@@ -335,7 +335,24 @@ export class Viewer {
             ? THREE.NoToneMapping
             : THREE.ACESFilmicToneMapping
         renderer.toneMappingExposure = look?.exposure ?? DEFAULT_EXPOSURE
-        this.scene.environmentIntensity = look?.environmentIntensity ?? 1
+        // A dome light's sky is already a picture of the light around the scene, so handing it to three as
+        // the environment map lights every surface by where it faces instead of by a flat two-colour fill.
+        // It replaces the hemisphere light the dome would otherwise become rather than adding to it, or the
+        // room is lit twice. A layer that asks for no environment keeps the hemisphere.
+        const environment = look?.environmentIntensity
+        if (environment !== undefined && this.#sky) {
+            this.scene.environment = this.#sky
+            this.scene.environmentRotation.set(SKY_ROTATION_X, 0, 0)
+            this.scene.environmentIntensity = environment
+            for (const light of this.#sceneLights) {
+                if (light instanceof THREE.HemisphereLight) {
+                    light.intensity = 0
+                }
+            }
+        } else {
+            this.scene.environment = null
+            this.scene.environmentIntensity = 1
+        }
         const saturation = look?.saturation ?? 1
         const contrast = look?.contrast ?? 1
         const grade = []
