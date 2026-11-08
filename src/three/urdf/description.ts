@@ -52,6 +52,21 @@ export interface DescriptionLight {
     shadow: boolean
 }
 
+/**
+ * How a scene wants to be shown: the part of its look that is not geometry or lights.
+ *
+ * Filmic tone mapping rolls bright colour toward white, so a lit room loses most of its paint to the
+ * curve; `neutral` keeps the hue and gives up brightness instead. `saturation` and `contrast` are the
+ * grade applied after that, which is the difference between a render and a plain rasterised frame.
+ */
+export interface DescriptionLook {
+    toneMap?: "neutral" | "filmic" | "linear" | "none"
+    exposure?: number
+    environmentIntensity?: number
+    saturation?: number
+    contrast?: number
+}
+
 export interface DescriptionJoint {
     name: string
     type: "revolute" | "continuous" | "prismatic" | "fixed" | "floating" | "planar"
@@ -73,6 +88,8 @@ export interface RobotDescription {
     joints: DescriptionJoint[]
     /** what the layer says lights it, in world space; absent or empty means the viewer's own lighting stands */
     lights?: DescriptionLight[]
+    /** how the layer asks to be shown; absent means the viewer's own look stands */
+    look?: DescriptionLook
 }
 
 const originMatrix = (origin: Origin) =>

@@ -16,6 +16,7 @@ import type {
     DescriptionJoint,
     DescriptionLight,
     DescriptionLink,
+    DescriptionLook,
     Origin,
     RobotDescription,
 } from "./description.ts"
@@ -95,6 +96,7 @@ export function parseUsda(text: string): RobotDescription {
         links,
         joints,
         lights: lightsOf(roots),
+        look: lookOf(roots),
     }
 }
 
@@ -804,6 +806,50 @@ function rotate(q: [number, number, number, number], v: [number, number, number]
         vy + (z * tx - x * tz),
         vz + (x * ty - y * tx),
     ]
+}
+
+/** The tone curves a layer may name, mapped to what the viewer knows. */
+const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
+    neutral: "neutral",
+    filmic: "filmic",
+    aces: "filmic",
+    acesfilmic: "filmic",
+    linear: "linear",
+    none: "none",
+}
+
+/**
+ * The look the layer asks for, from a `RenderSettings` prim.
+ *
+ * A scene that knows how it is lit also knows how it wants to be shown, and the two are one decision: the
+ * furniture colours in office_555 were picked against a particular tone curve, so a viewer that applies a
+ * different one shows a room nobody chose. Reading it lets the layer say instead.
+ *
+ * Everything here is optional. A layer naming none of it, or no RenderSettings prim at all, leaves the
+ * viewer's own look alone.
+ */
+function lookOf(roots: Prim[]): DescriptionLook | undefined {
+    let found: Prim | null = null
+    walk(roots, (prim) => {
+        if (!found && prim.type === "RenderSettings") found = prim
+    })
+    if (!found) return undefined
+    const settings: Prim = found
+    const number = (name: string): number | undefined => {
+        const raw = settings.attrs[`dimos:look:${name}`]
+        if (raw === undefined) return undefined
+        const value = Number(unquote(raw))
+        return Number.isFinite(value) ? value : undefined
+    }
+    const named = unquote(settings.attrs["dimos:look:toneMap"] ?? "").toLowerCase()
+    const look: DescriptionLook = {
+        toneMap: TONE_MAPS[named],
+        exposure: number("exposure"),
+        environmentIntensity: number("environmentIntensity"),
+        saturation: number("saturation"),
+        contrast: number("contrast"),
+    }
+    return Object.values(look).some((value) => value !== undefined) ? look : undefined
 }
 
 /** USD light prims, by their schema name. A layer that names none leaves the viewer's own lighting in place. */

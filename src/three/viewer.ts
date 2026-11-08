@@ -8,7 +8,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
 import { CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js"
 import type { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js"
 import { Store } from "./store.ts"
-import type { DescriptionLight } from "./urdf/description.ts"
+import type { DescriptionLight, DescriptionLook } from "./urdf/description.ts"
 import { focusDistance, splatBackground } from "./point_material.ts"
 import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 
@@ -16,6 +16,7 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 // three's units is this side's job, because only this side knows three's falloff model.
 //
 // A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
+const DEFAULT_EXPOSURE = 1.1
 const DISTANT_GAIN = 3
 // A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
 // on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
@@ -154,8 +155,8 @@ export class Viewer {
     #listeners: Set<(frame: FrameInfo) => void> = new Set()
     #grid: THREE.GridHelper | null = null
     #gridVisible = true
-    #gridSize = 200
-    #gridDivisions = 200
+    #gridSize = 60
+    #gridDivisions = 60
     #frameTimes: number[] = []
     #cpuTimes: number[] = []
     #pendingData: { ts: number; arrival: number }[] = []
@@ -188,7 +189,7 @@ export class Viewer {
      * @param options `clock`: the clock message
      *   timestamps are in (ms, for latency; default Date.now). `near` / `far` / `fov`: the camera (defaults 0.05 m,
      *   10 km, 60°; a small model like a URDF wants near ≈ 0.001). `gridSize` (m) / `gridDivisions`: the ground grid
-     *   (default 200 m in 1 m cells). `freeOrbit`: the camera may orbit below the ground (default: it stays above).
+     *   (default 60 m in 1 m cells; a grid that runs to the horizon aliases its lines into a black band there). `freeOrbit`: the camera may orbit below the ground (default: it stays above).
      */
     constructor(
         host: HTMLElement,
@@ -199,8 +200,8 @@ export class Viewer {
             near = 0.05,
             far = 10000,
             fov = 60,
-            gridSize = 200,
-            gridDivisions = 200,
+            gridSize = 60,
+            gridDivisions = 60,
             freeOrbit = false,
         }: ViewerOptions = {},
     ) {
@@ -219,9 +220,10 @@ export class Viewer {
             renderer.setPixelRatio(pixelRatio())
             renderer.setClearColor(0x000000, 0)
             // Lights are given in the intensities a room really has, which blow out without one. Filmic rolls the
-            // highlights off instead of clipping them to white.
+            // highlights off instead of clipping them to white. A scene that would rather keep its colour than its
+            // brightness says so through setSceneLook.
             renderer.toneMapping = THREE.ACESFilmicToneMapping
-            renderer.toneMappingExposure = 1.1
+            renderer.toneMappingExposure = DEFAULT_EXPOSURE
             // A shape only reads as a shape if something is darker than the rest of it.
             renderer.shadowMap.enabled = true
             renderer.shadowMap.type = THREE.PCFSoftShadowMap
@@ -307,6 +309,39 @@ export class Viewer {
      * Intensities arrive in USD's photometric units, where a lamp is in the hundreds; three's lights are relative,
      * so a point light is divided back down by the same factor the exporter multiplied up by.
      */
+    /**
+     * How the scene asks to be shown, or `null` for the viewer's own look.
+     *
+     * A room's colours were chosen against some tone curve, and showing them through a different one shows a room
+     * nobody picked: filmic rolls bright colour toward white, so paint that looked right in the authoring tool
+     * arrives washed out. A layer that cares names the curve it wants, and the grade that goes after it.
+     *
+     * The grade is a CSS filter on the canvas rather than a render pass. The canvas is already transparent with
+     * the page's background behind it, so the filter reaches what was drawn and nothing else, and it costs no
+     * extra target to composite through -- worth more here than the precision a real pass would buy.
+     */
+    setSceneLook(look: DescriptionLook | null | undefined): void {
+        const renderer = this.renderer
+        if (!renderer) return
+        const curve = look?.toneMap
+        renderer.toneMapping = curve === "neutral"
+            ? THREE.NeutralToneMapping
+            : curve === "linear"
+            ? THREE.LinearToneMapping
+            : curve === "none"
+            ? THREE.NoToneMapping
+            : THREE.ACESFilmicToneMapping
+        renderer.toneMappingExposure = look?.exposure ?? DEFAULT_EXPOSURE
+        this.scene.environmentIntensity = look?.environmentIntensity ?? 1
+        const saturation = look?.saturation ?? 1
+        const contrast = look?.contrast ?? 1
+        const grade = []
+        if (saturation !== 1) grade.push(`saturate(${saturation})`)
+        if (contrast !== 1) grade.push(`contrast(${contrast})`)
+        renderer.domElement.style.filter = grade.length > 0 ? grade.join(" ") : ""
+        this.requestRender()
+    }
+
     setSceneLights(lights: readonly DescriptionLight[] | null | undefined): void {
         for (const light of this.#sceneLights) {
             light.removeFromParent()

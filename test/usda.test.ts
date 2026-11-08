@@ -412,3 +412,48 @@ def Xform "room"
     assertAlmostEquals(dome.color[2], 0.95, 1e-6, "the sky keeps its own colour")
     assertEquals(lights.filter((light) => light.type === "distant").length, 1, "the sun is still a sun")
 })
+
+test("a layer says how it wants to be shown, and a layer that says nothing stays silent", () => {
+    // The furniture colours in a room were picked against some tone curve. Showing them through a
+    // different one shows a room nobody chose, so the layer gets to name the curve and the grade.
+    const graded = `#usda 1.0
+(
+    defaultPrim = "room"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "room"
+{
+}
+
+def RenderSettings "Look"
+{
+    uniform token dimos:look:toneMap = "neutral"
+    float dimos:look:exposure = 1
+    float dimos:look:saturation = 1.25
+    float dimos:look:contrast = 1.06
+}
+`
+    const look = parseUsda(graded).look
+    assert(look, "the layer named a look and it did not survive parsing")
+    assertEquals(look.toneMap, "neutral")
+    assertAlmostEquals(look.exposure ?? 0, 1, 1e-6)
+    assertAlmostEquals(look.saturation ?? 0, 1.25, 1e-6)
+    assertAlmostEquals(look.contrast ?? 0, 1.06, 1e-6)
+    // Absent is not the same as default: a viewer told nothing keeps whatever it already had.
+    assertEquals(look.environmentIntensity, undefined)
+
+    const plain = `#usda 1.0
+(
+    defaultPrim = "room"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "room"
+{
+}
+`
+    assertEquals(parseUsda(plain).look, undefined, "a layer with no RenderSettings asks for nothing")
+})
