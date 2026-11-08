@@ -30,7 +30,7 @@ const SHADOW_REFIT_MS = 2000
 import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
-import { aimShadow, castsShadow, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
+import { aimShadow, castsShadow, lampCastsShadow, MAX_SHADOW_LAMPS, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
 import { SKY_ROTATION_X, skyTexture } from "./sky.ts"
 
 export interface RenderStats {
@@ -317,6 +317,16 @@ export class Viewer {
             this.#clearSky()
         }
         for (const light of this.#defaultLights) light.visible = wanted.length === 0
+        // A lamp's shadow is a cube map -- six renders a frame -- so only the strongest few get
+        // one. Without any, a room lit from its own ceiling has nothing standing on the floor:
+        // the sun through the windows is the only thing casting, and a desk under a fitting
+        // throws no shadow of its own.
+        const lamps = wanted.filter((light) =>
+            light.type !== "distant" && light.type !== "dome" && light.type !== "ambient"
+        )
+        const casting = new Set(
+            [...lamps].sort((a, b) => b.intensity - a.intensity).slice(0, MAX_SHADOW_LAMPS),
+        )
         for (const light of wanted) {
             const colour = new THREE.Color(light.color[0], light.color[1], light.color[2])
             if (light.type === "dome") {
@@ -345,6 +355,10 @@ export class Viewer {
                 }
             } else {
                 made.position.set(...light.xyz)
+                if (made instanceof THREE.PointLight && light.shadow && casting.has(light)) {
+                    // it only has to reach the floor and the furniture under it, not the room
+                    lampCastsShadow(made, Math.max(4, made.position.z * 1.6))
+                }
             }
             made.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(made)
