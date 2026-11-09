@@ -848,6 +848,7 @@ function lookOf(roots: Prim[]): DescriptionLook | undefined {
         toneMap: TONE_MAPS[named],
         exposure: number("exposure"),
         environmentIntensity: number("environmentIntensity"),
+        occlusion: number("occlusion"),
         saturation: number("saturation"),
         contrast: number("contrast"),
     }

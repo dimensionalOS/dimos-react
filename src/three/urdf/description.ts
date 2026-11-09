@@ -67,6 +67,8 @@ export interface DescriptionLook {
     exposure?: number
     /** how strongly the dome's sky lights the room as an environment map (Blender's irradiance volumes, roughly) */
     environmentIntensity?: number
+    /** how strongly to darken what is enclosed, standing in for the bounce light that never reaches it */
+    occlusion?: number
     saturation?: number
     contrast?: number
 }

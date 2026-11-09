@@ -44,6 +44,10 @@ import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
 import { aimShadow, castsShadow, lampCastsShadow, MAX_SHADOW_LAMPS, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
 import { SKY_ROTATION_X, skyTexture } from "./sky.ts"
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js"
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js"
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js"
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js"
 
 export interface RenderStats {
     fps: number
@@ -129,6 +133,9 @@ export class Viewer {
     /** the lighting a loaded scene asked for, which stands in for the defaults while it is there */
     #sceneLights: THREE.Light[] = []
     #look: DescriptionLook | null = null
+    #composer: EffectComposer | null = null
+    #gtao: GTAOPass | null = null
+    #occlusion = 0
     #environment: THREE.Texture | null = null
     #environmentFrom: THREE.Texture | null = null
     #shadowLamps: THREE.PointLight[] = []
@@ -364,6 +371,13 @@ export class Viewer {
         //
         // Pre-filtered, not handed over raw: three builds a PMREM from whatever is assigned here, and a
         // raw strip made that fail. Generated once per sky and disposed with it.
+        const occlusion = Math.max(0, Math.min(1, look?.occlusion ?? 0))
+        if (occlusion !== this.#occlusion) {
+            this.#occlusion = occlusion
+            if (this.#gtao) {
+                this.#gtao.blendIntensity = occlusion
+            }
+        }
         const environment = look?.environmentIntensity
         if (environment !== undefined && this.#sky) {
             this.scene.environment = this.#environmentOf(this.#sky)
@@ -687,8 +701,67 @@ export class Viewer {
     }
 
     #render() {
-        if (this.renderer) {
-            this.#onTop.render(this.renderer, this.scene, this.camera)
+        const renderer = this.renderer
+        if (!renderer) {
+            return
+        }
+        const composer = this.#occlusion > 0 ? this.#composerFor(renderer) : null
+        if (!composer) {
+            this.#onTop.render(renderer, this.scene, this.camera)
+            return
+        }
+        // The beauty goes through the composer so ambient occlusion can darken the creases; the
+        // on-top overlay then draws straight to the canvas over it, which is what it is for. Tone
+        // mapping happens once: the composer's targets are linear, so three leaves the curve to
+        // OutputPass, and the overlay gets it from the renderer on its own way to the screen.
+        const mask = this.camera.layers.mask
+        this.camera.layers.set(0)
+        composer.render()
+        this.camera.layers.mask = mask
+        if (this.#onTop.any()) {
+            const { autoClear } = renderer
+            const background = this.scene.background
+            renderer.autoClear = false
+            this.scene.background = null
+            renderer.clearDepth()
+            this.camera.layers.set(ON_TOP_CHANNEL)
+            renderer.render(this.scene, this.camera)
+            this.camera.layers.mask = mask
+            this.scene.background = background
+            renderer.autoClear = autoClear
+        }
+    }
+
+    /**
+     * The composer, built on first use and kept. Null if it could not be built -- a renderer that
+     * cannot give us the targets is a reason to draw the scene plainly, not a reason to draw nothing.
+     */
+    #composerFor(renderer: THREE.WebGLRenderer): EffectComposer | null {
+        if (this.#composer) {
+            return this.#composer
+        }
+        try {
+            const width = Math.max(1, this.#host.clientWidth)
+            const height = Math.max(1, this.#host.clientHeight)
+            const composer = new EffectComposer(renderer)
+            composer.addPass(new RenderPass(this.scene, this.camera))
+            const gtao = new GTAOPass(this.scene, this.camera, width, height)
+            // Nothing in this renderer bounces light, so a crease is lit exactly as brightly as the
+            // open floor beside it. This is the half of bounce that can be had cheaply: darken what
+            // is enclosed. The radius is in metres of scene, and a desk's underside is the scale that
+            // matters here, not a room's corner.
+            gtao.updateGtaoMaterial({ radius: 0.5, distanceExponent: 1, thickness: 1, scale: 1 })
+            gtao.blendIntensity = this.#occlusion
+            composer.addPass(gtao)
+            composer.addPass(new OutputPass())
+            composer.setSize(width, height)
+            this.#gtao = gtao
+            this.#composer = composer
+            return composer
+        } catch (error) {
+            console.warn("3D view: no ambient occlusion (composer unavailable)", error)
+            this.#occlusion = 0
+            return null
         }
     }
 
@@ -1012,6 +1085,7 @@ export class Viewer {
         } else {
             Object.assign(this.canvas, { width, height })
         }
+        this.#composer?.setSize(width, height)
         this.labels.setSize(width, height)
         this.camera.aspect = width / height
         this.camera.updateProjectionMatrix()
