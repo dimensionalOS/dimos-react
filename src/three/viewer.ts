@@ -136,6 +136,7 @@ export class Viewer {
     #composer: EffectComposer | null = null
     #gtao: GTAOPass | null = null
     #occlusion = 0
+    #occlusionRadius = 0.5
     #environment: THREE.Texture | null = null
     #environmentFrom: THREE.Texture | null = null
     #shadowLamps: THREE.PointLight[] = []
@@ -371,6 +372,13 @@ export class Viewer {
         //
         // Pre-filtered, not handed over raw: three builds a PMREM from whatever is assigned here, and a
         // raw strip made that fail. Generated once per sky and disposed with it.
+        // Omniverse states the reach in scene units and defaults it to 35, which is a room; under a
+        // desk is the scale that reads here, so a stated radius is honoured but kept sane.
+        const radius = Math.max(0.1, Math.min(4, look?.occlusionRadius ?? 0.5))
+        if (radius !== this.#occlusionRadius) {
+            this.#occlusionRadius = radius
+            this.#gtao?.updateGtaoMaterial({ radius })
+        }
         const occlusion = Math.max(0, Math.min(1, look?.occlusion ?? 0))
         if (occlusion !== this.#occlusion) {
             this.#occlusion = occlusion
@@ -750,7 +758,12 @@ export class Viewer {
             // open floor beside it. This is the half of bounce that can be had cheaply: darken what
             // is enclosed. The radius is in metres of scene, and a desk's underside is the scale that
             // matters here, not a room's corner.
-            gtao.updateGtaoMaterial({ radius: 0.5, distanceExponent: 1, thickness: 1, scale: 1 })
+            gtao.updateGtaoMaterial({
+                radius: this.#occlusionRadius,
+                distanceExponent: 1,
+                thickness: 1,
+                scale: 1,
+            })
             gtao.blendIntensity = this.#occlusion
             composer.addPass(gtao)
             composer.addPass(new OutputPass())

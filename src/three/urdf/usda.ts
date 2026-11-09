@@ -808,7 +808,17 @@ function rotate(q: [number, number, number, number], v: [number, number, number]
     ]
 }
 
-/** The tone curves a layer may name, mapped to what the viewer knows. */
+/** Omniverse's `/rtx/post/tonemap/op` enum. Their docs give 4 for ACES; 5 is accepted too because
+ *  the operator list is ordered differently between versions. Clamp and Linear are the only others
+ *  with a three equivalent, and the rest fall through to the layer's own spelling. */
+const RTX_TONEMAP_OPS: Record<number, NonNullable<DescriptionLook["toneMap"]>> = {
+    0: "none",
+    1: "linear",
+    4: "filmic",
+    5: "filmic",
+}
+
+/** The tone curves a layer may name, for the two curves Omniverse's operator list has no number for. */
 const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
     // what Blender puts on by default, so a scene authored to look right there can ask for it by name
     agx: "agx",
@@ -833,24 +843,41 @@ const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
 function lookOf(roots: Prim[]): DescriptionLook | undefined {
     let found: Prim | null = null
     walk(roots, (prim) => {
-        if (!found && prim.type === "RenderSettings") found = prim
+        if (found) return
+        // Omniverse hangs these on a prim as applied API schemas rather than giving it a type, so a
+        // stage from Isaac is recognised by carrying the attributes at all.
+        if (prim.type === "RenderSettings" || Object.keys(prim.attrs).some((k) => k.startsWith("omni:rtx:"))) {
+            found = prim
+        }
     })
     if (!found) return undefined
     const settings: Prim = found
-    const number = (name: string): number | undefined => {
-        const raw = settings.attrs[`dimos:look:${name}`]
+    const attr = (name: string): number | undefined => {
+        const raw = settings.attrs[name]
         if (raw === undefined) return undefined
         const value = Number(unquote(raw))
         return Number.isFinite(value) ? value : undefined
     }
+    const flag = (name: string): boolean | undefined => {
+        const raw = settings.attrs[name]
+        return raw === undefined ? undefined : unquote(raw) !== "0" && unquote(raw) !== "false"
+    }
+
+    // Omniverse's spelling first, so a stage authored in Isaac reads here without being rewritten;
+    // ours only where theirs has no equivalent.
+    const op = attr("omni:rtx:post:tonemap:op")
     const named = unquote(settings.attrs["dimos:look:toneMap"] ?? "").toLowerCase()
+    const occlusionOn = flag("omni:rtx:ambientOcclusion:enabled")
     const look: DescriptionLook = {
-        toneMap: TONE_MAPS[named],
-        exposure: number("exposure"),
-        environmentIntensity: number("environmentIntensity"),
-        occlusion: number("occlusion"),
-        saturation: number("saturation"),
-        contrast: number("contrast"),
+        toneMap: (op !== undefined ? RTX_TONEMAP_OPS[op] : undefined) ?? TONE_MAPS[named],
+        exposure: attr("dimos:look:exposure"),
+        environmentIntensity: attr("dimos:look:environmentIntensity"),
+        occlusion: occlusionOn === undefined ? attr("dimos:look:occlusion") : (occlusionOn ? 1 : 0),
+        // /rtx/ambientOcclusion/rayLength: how far the occlusion reaches, in scene units, which is
+        // exactly what the GTAO pass means by radius.
+        occlusionRadius: attr("omni:rtx:ambientOcclusion:rayLength"),
+        saturation: attr("dimos:look:saturation"),
+        contrast: attr("dimos:look:contrast"),
     }
     return Object.values(look).some((value) => value !== undefined) ? look : undefined
 }

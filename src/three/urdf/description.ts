@@ -69,6 +69,8 @@ export interface DescriptionLook {
     environmentIntensity?: number
     /** how strongly to darken what is enclosed, standing in for the bounce light that never reaches it */
     occlusion?: number
+    /** how far the occlusion reaches, in metres (Omniverse's /rtx/ambientOcclusion/rayLength) */
+    occlusionRadius?: number
     saturation?: number
     contrast?: number
 }
