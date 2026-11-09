@@ -457,3 +457,90 @@ def Xform "room"
 `
     assertEquals(parseUsda(plain).look, undefined, "a layer with no RenderSettings asks for nothing")
 })
+
+test("exposure comes off the camera, in USD's own spelling", () => {
+    // USD puts exposure on the camera rather than on the render settings, as a log base-2 stop,
+    // and Isaac's camera exposure API puts the physical rig beside it. A stage authored there has
+    // to read here without being rewritten.
+    const head = `#usda 1.0
+(
+    defaultPrim = "room"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "room"
+{
+}
+`
+    const stops = parseUsda(`${head}
+def Camera "view"
+{
+    float exposure = 1
+}
+`).look
+    assert(stops, "a camera that names an exposure is a look on its own, with no RenderSettings")
+    assertAlmostEquals(stops.exposure ?? 0, 2, 1e-6, "one stop doubles the image")
+
+    // the physical set, at USD's defaults: ISO 100, 1 s, f/1, responsivity 1 -- so no change
+    const neutral = parseUsda(`${head}
+def Camera "view"
+{
+    float exposure:iso = 100
+    float exposure:time = 1
+    float exposure:fStop = 1
+    float exposure:responsivity = 1
+}
+`).look
+    assertAlmostEquals(neutral?.exposure ?? 0, 1, 1e-6, "the default rig changes nothing")
+
+    // responsivity * (time * iso/100 * 2^stops) / fStop^2 = 1 * (0.5 * 4 * 2) / 4
+    const rigged = parseUsda(`${head}
+def Camera "view"
+{
+    float exposure = 1
+    float exposure:iso = 400
+    float exposure:time = 0.5
+    float exposure:fStop = 2
+}
+`).look
+    assertAlmostEquals(rigged?.exposure ?? 0, 1, 1e-6)
+
+    // UsdRender points the settings at one camera, so that is the one that is read
+    const two = parseUsda(`${head}
+def Camera "wrong"
+{
+    float exposure = 3
+}
+
+def Camera "chosen"
+{
+    float exposure = 0
+}
+
+def RenderSettings "Look"
+{
+    rel camera = </room/chosen>
+    float dimos:look:saturation = 1.2
+}
+`).look
+    assertAlmostEquals(two?.exposure ?? -1, 1, 1e-6, "the linked camera, not the first one")
+    assertAlmostEquals(two?.saturation ?? 0, 1.2, 1e-6, "and the rest of the look still reads")
+
+    // our flat multiplier still works where there is no camera to ask
+    const flat = parseUsda(`${head}
+def RenderSettings "Look"
+{
+    float dimos:look:exposure = 1.05
+}
+`).look
+    assertAlmostEquals(flat?.exposure ?? 0, 1.05, 1e-6)
+
+    const silent = parseUsda(`${head}
+def Camera "view"
+{
+    float focalLength = 24
+}
+`).look
+    assertEquals(silent, undefined, "a camera that says nothing about exposure is not a look")
+})

@@ -831,6 +831,53 @@ const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
 }
 
 /**
+ * The exposure the stage asks to be viewed at, as a plain multiplier.
+ *
+ * USD puts exposure on the camera rather than on the render settings, because that is where it
+ * belongs: a stage is lit in physical units and a camera decides how much of that reaches the
+ * image. `UsdGeomCamera.exposure` is a log base-2 compensation -- 0 leaves it alone, +1 doubles
+ * the image-plane intensities -- and core USD and Isaac's OmniRtxCameraExposureAPI_1 both put the
+ * physical rig next to it: `exposure:iso`, `exposure:time`, `exposure:fStop`, `exposure:responsivity`,
+ * combined as responsivity * (time * iso/100 * 2^exposure) / fStop^2. At their defaults that is 1,
+ * so a camera naming none of them changes nothing and doubling the ISO doubles the image.
+ *
+ * Which camera: UsdRender has the render settings point at one (`rel camera = </World/Camera>`),
+ * so follow that where it is given, and otherwise take the stage's only one.
+ */
+function cameraExposure(roots: Prim[], settings: Prim | undefined): number | undefined {
+    const linked = (settings?.attrs["camera"] ?? "").match(/<([^>]+)>/)?.[1]?.split("/").pop()
+    const cameras: Prim[] = []
+    walk(roots, (prim) => {
+        if (prim.type === "Camera") {
+            cameras.push(prim)
+        }
+    })
+    const camera = cameras.find((prim) => prim.name === linked) ?? cameras[0]
+    if (camera === undefined) {
+        return undefined
+    }
+    const attr = (name: string): number | undefined => {
+        const raw = camera.attrs[name]
+        if (raw === undefined) {
+            return undefined
+        }
+        const value = Number(unquote(raw))
+        return Number.isFinite(value) ? value : undefined
+    }
+    const stops = attr("exposure")
+    const iso = attr("exposure:iso")
+    const time = attr("exposure:time")
+    const fStop = attr("exposure:fStop")
+    const responsivity = attr("exposure:responsivity")
+    if ([stops, iso, time, fStop, responsivity].every((value) => value === undefined)) {
+        return undefined // a camera that says nothing about exposure is not a look
+    }
+    const aperture = fStop ?? 1
+    return (responsivity ?? 1) * ((time ?? 1) * ((iso ?? 100) / 100) * Math.pow(2, stops ?? 0)) /
+        (aperture * aperture)
+}
+
+/**
  * The look the layer asks for, from a `RenderSettings` prim.
  *
  * A scene that knows how it is lit also knows how it wants to be shown, and the two are one decision: the
@@ -841,17 +888,20 @@ const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
  * viewer's own look alone.
  */
 function lookOf(roots: Prim[]): DescriptionLook | undefined {
-    let found: Prim | null = null
+    const matches: Prim[] = []
     walk(roots, (prim) => {
-        if (found) return
+        if (matches.length > 0) return
         // Omniverse hangs these on a prim as applied API schemas rather than giving it a type, so a
         // stage from Isaac is recognised by carrying the attributes at all.
         if (prim.type === "RenderSettings" || Object.keys(prim.attrs).some((k) => k.startsWith("omni:rtx:"))) {
-            found = prim
+            matches.push(prim)
         }
     })
-    if (!found) return undefined
-    const settings: Prim = found
+    const settings = matches[0]
+    if (settings === undefined) {
+        const exposure = cameraExposure(roots, undefined)
+        return exposure === undefined ? undefined : { exposure }
+    }
     const attr = (name: string): number | undefined => {
         const raw = settings.attrs[name]
         if (raw === undefined) return undefined
@@ -870,7 +920,8 @@ function lookOf(roots: Prim[]): DescriptionLook | undefined {
     const occlusionOn = flag("omni:rtx:ambientOcclusion:enabled")
     const look: DescriptionLook = {
         toneMap: (op !== undefined ? RTX_TONEMAP_OPS[op] : undefined) ?? TONE_MAPS[named],
-        exposure: attr("dimos:look:exposure"),
+        // the camera's, in USD's own spelling, before our flat multiplier
+        exposure: cameraExposure(roots, settings) ?? attr("dimos:look:exposure"),
         environmentIntensity: attr("dimos:look:environmentIntensity"),
         occlusion: occlusionOn === undefined ? attr("dimos:look:occlusion") : (occlusionOn ? 1 : 0),
         // /rtx/ambientOcclusion/rayLength: how far the occlusion reaches, in scene units, which is
