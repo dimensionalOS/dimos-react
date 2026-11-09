@@ -17,6 +17,10 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 //
 // A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
 const DEFAULT_EXPOSURE = 1.1
+/** what a lamp contributes when it is one of the few throwing a shadow, and when it is not. Above 1
+ *  and below 1 so the room keeps roughly the light it had while the shadows get their contrast. */
+const CASTER_SHARE = 1.7
+const FILL_SHARE = 0.4
 const DISTANT_GAIN = 3
 // A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
 // on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
@@ -460,12 +464,15 @@ export class Viewer {
             .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
         const chosen = new Set(byRange.slice(0, MAX_SHADOW_LAMPS))
         for (const lamp of this.#shadowLamps) {
-            // Every lamp stays lit. Switching the far ones off was tried, to stop them filling in the
-            // shadows the near ones cast, and it does deepen the shadow -- but a room is not dark where
-            // the camera is not, and it took a third of the light out with it. What actually matters is
-            // that the lamps overhead of whatever is being looked at are the ones casting; the rest are
-            // far enough that their inverse-square fill is small.
+            // Every lamp stays lit -- switching the far ones off was tried and took a third of the light
+            // with it, leaving half the office dark. Instead the four that cast carry more of the room
+            // and the rest carry less. A lamp that does not occlude lights straight into every shadow the
+            // casters throw, so with eighteen fittings and four cube maps the shadow could only ever be
+            // about four eighteenths deep. Weighting the casters up and the others down buys that depth
+            // back without a fifth shadow map and without turning any part of the room off.
             const wanted = chosen.has(lamp)
+            const base = (lamp.userData.baseIntensity ??= lamp.intensity)
+            lamp.intensity = base * (wanted ? CASTER_SHARE : FILL_SHARE)
             if (wanted === lamp.castShadow) {
                 continue
             }
