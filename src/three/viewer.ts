@@ -474,7 +474,14 @@ export class Viewer {
             return
         }
         const eye = this.camera.position
-        const byRange = [...this.#shadowLamps]
+        // Nearest is not enough in a building with more than one floor. Stand on the upper storey and
+        // the closest fittings are the ones in the ceiling below you: they are metres away through a
+        // slab, they light the floor underneath, and nothing they do reaches what you are looking at.
+        // Boosting those and dimming the lamps overhead left the upper floor black. A lamp has to be
+        // above the eye to be a candidate; if none is, fall back to range so a camera up among the
+        // roof beams still gets something.
+        const above = this.#shadowLamps.filter((lamp) => lamp.position.z > eye.z)
+        const byRange = (above.length > 0 ? above : [...this.#shadowLamps])
             .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
         const chosen = new Set(byRange.slice(0, MAX_SHADOW_LAMPS))
         for (const lamp of this.#shadowLamps) {
