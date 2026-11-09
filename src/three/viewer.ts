@@ -19,6 +19,13 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 const DEFAULT_EXPOSURE = 1.1
 /** what a lamp contributes when it is one of the few throwing a shadow, and when it is not. Above 1
  *  and below 1 so the room keeps roughly the light it had while the shadows get their contrast. */
+/** Point a hemisphere light at this viewer's up axis. Three aims it with its position, defaulting to
+ *  (0,1,0); in a Z-up world that lights the sides of things and leaves their tops in the dim mix. */
+function hemisphereUp(light: THREE.HemisphereLight): THREE.HemisphereLight {
+    light.position.set(0, 0, 1)
+    return light
+}
+
 const CASTER_SHARE = 1.7
 const FILL_SHARE = 0.4
 const DISTANT_GAIN = 3
@@ -267,6 +274,11 @@ export class Viewer {
         // it dark, with shadows underneath. The fill opposite the key keeps that far side readable rather than
         // black.
         const sky = new THREE.HemisphereLight(0xdde8ff, 0x202830, 0.5)
+        // A hemisphere light takes its axis from its position, which three defaults to (0,1,0). This
+        // viewer is Z-up, so left alone the sky half lights whatever faces +Y -- a sideways direction
+        // here -- and every floor and desk top gets the dim mix halfway between sky and ground. That
+        // is why an upward face could come out near black while the side of the same object was lit.
+        sky.position.set(0, 0, 1)
         const sun = new THREE.DirectionalLight(0xfff4e6, 2.4)
         castsShadow(sun, new THREE.Vector3(-5, -3, -10))
         const fill = new THREE.DirectionalLight(0xdfe8ff, 0.6)
@@ -411,7 +423,9 @@ export class Viewer {
             const made = light.type === "distant"
                 ? new THREE.DirectionalLight(colour, light.intensity * DISTANT_GAIN)
                 : light.type === "ambient" || light.type === "dome"
-                ? new THREE.HemisphereLight(colour, colour.clone().multiplyScalar(0.4), light.intensity * AMBIENT_GAIN)
+                ? hemisphereUp(
+                    new THREE.HemisphereLight(colour, colour.clone().multiplyScalar(0.4), light.intensity * AMBIENT_GAIN),
+                )
                 : new THREE.PointLight(
                     colour,
                     light.intensity * POINT_GAIN * POINT_REFERENCE_METRES * POINT_REFERENCE_METRES,
