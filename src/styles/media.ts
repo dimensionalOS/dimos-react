@@ -109,6 +109,10 @@ export const MEDIA_CSS = /* css */ `
     gap: 12px;
     padding: 0 12px;
     min-height: 30px;
+    /* the rows box is a flex column with a max height, so a row would otherwise be shrunk to its
+       min-height and its text would spill over the row below -- which the narrow layout always hit,
+       because there the name is two lines (37px) and min-height is 30px */
+    flex-shrink: 0;
     border-bottom: 1px solid var(--hair);
 }
 .dr-playback__row--busy { opacity: 0.5; pointer-events: none; }

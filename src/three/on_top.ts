@@ -30,6 +30,11 @@ export class OnTopPass {
         return this.#roots.has(object)
     }
 
+    /** Whether anything is on top at all, for a caller doing its own main pass. */
+    any(): boolean {
+        return this.#roots.size > 0
+    }
+
     /** The scene, then (when anything is on top) the on-top objects over it. Lights must be on ON_TOP_CHANNEL too. */
     render(renderer: PassRenderer, scene: THREE.Scene, camera: THREE.Camera) {
         if (!this.#roots.size) {

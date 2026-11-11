@@ -1,0 +1,141 @@
+#usda 1.0
+(
+    defaultPrim = "probe"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "probe"
+{
+    def Xform "world" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+        displayName = "world"
+    )
+    {
+        def Xform "base" (
+            prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+            customData = {
+                dictionary urdf = {
+                    string[] unconverted = ['''<inertial>
+      <mass value="2.5" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>''', '<gazebo><plugin name="odd">{ "braces": "inside a string" }</plugin></gazebo>']
+                }
+            }
+            displayName = "base"
+        )
+        {
+            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0.8, 1) )
+            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+            def Cube "collision_0" (
+                prepend apiSchemas = ["PhysicsCollisionAPI"]
+            )
+            {
+                double size = 1
+                token visibility = "invisible"
+                float3 xformOp:scale = (0.1, 0.2, 0.3)
+                matrix4d xformOp:transform = ( (0.8775825618903726, 0.479425538604203, 0, 0), (-0.479425538604203, 0.8775825618903726, 0, 0), (0, 0, 0.9999999999999999, 0), (0, 0, 0.01, 1) )
+                uniform token[] xformOpOrder = ["xformOp:scale", "xformOp:transform"]
+            }
+
+            def Xform "upper_arm" (
+                prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                displayName = "upper-arm"
+            )
+            {
+                matrix4d xformOp:transform = ( (0.9362933635841993, 0.2896294776255156, -0.19866933079506122, 0), (-0.27509584731824377, 0.9564250858492325, 0.0978433950072557, 0), (0.21835066314633444, -0.03695701352462507, 0.975170327201816, 0), (0.01, 0.02, 0.03, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Mesh "visual_0" (
+                    assetInfo = {
+                        asset identifier = @/tmp/tmpt7tpaug1/meshes/arm.stl@
+                        string version = "sha256:f09976ff3070af75e5ea8ecf053ca8ebd082482dccfa45eec151de2fff534483"
+                    }
+                    prepend references = @/tmp/tmpt7tpaug1/meshes/arm.stl@
+                )
+                {
+                    color3f[] primvars:displayColor = [(0.5, 0.6, 0.7)]
+                    float3 xformOp:scale = (1, 1, 1)
+                    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                    uniform token[] xformOpOrder = ["xformOp:scale", "xformOp:transform"]
+                }
+
+                def Cylinder "collision_1" (
+                    prepend apiSchemas = ["PhysicsCollisionAPI"]
+                )
+                {
+                    uniform token axis = "Z"
+                    double height = 0.4
+                    double radius = 0.05
+                    token visibility = "invisible"
+                    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                    uniform token[] xformOpOrder = ["xformOp:transform"]
+                }
+
+                def Xform "tool" (
+                    prepend apiSchemas = ["PhysicsRigidBodyAPI"]
+                    displayName = "tool"
+                )
+                {
+                    matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0.4, 1) )
+                    uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                    def Sphere "collision_0" (
+                        prepend apiSchemas = ["PhysicsCollisionAPI"]
+                    )
+                    {
+                        double radius = 0.03
+                        token visibility = "invisible"
+                        matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                        uniform token[] xformOpOrder = ["xformOp:transform"]
+                    }
+                }
+            }
+        }
+    }
+
+    def Scope "joints"
+    {
+        def PhysicsJoint "floating_base" (
+            displayName = "floating_base"
+        )
+        {
+            rel physics:body0 = </probe/world>
+            rel physics:body1 = </probe/world/base>
+            point3f physics:localPos0 = (0, 0, 0.8)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (1, 0, 0, 0)
+            quatf physics:localRot1 = (1, 0, 0, 0)
+        }
+
+        def PhysicsRevoluteJoint "shoulder" (
+            displayName = "shoulder"
+        )
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </probe/world/base>
+            rel physics:body1 = </probe/world/base/upper_arm>
+            point3f physics:localPos0 = (0.01, 0.02, 0.03)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.84996235, -0.33587876, 0.36712936, 0.17310545)
+            quatf physics:localRot1 = (0.88807386, -0.3250576, 0.3250576, 0)
+            float physics:lowerLimit = -68.75494
+            float physics:upperLimit = 45.836624
+        }
+
+        def PhysicsRevoluteJoint "wrist" (
+            displayName = "wrist"
+        )
+        {
+            uniform token physics:axis = "Z"
+            rel physics:body0 = </probe/world/base/upper_arm>
+            rel physics:body1 = </probe/world/base/upper_arm/tool>
+            point3f physics:localPos0 = (0, 0, 0.4)
+            point3f physics:localPos1 = (0, 0, 0)
+            quatf physics:localRot0 = (0.70710677, -0.70710677, 0, 0)
+            quatf physics:localRot1 = (0.70710677, -0.70710677, 0, 0)
+        }
+    }
+}
+

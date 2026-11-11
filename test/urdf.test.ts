@@ -137,3 +137,31 @@ test("joint positions read back from link poses (TF)", () => {
     assertAlmostEquals(positions.shoulder, 0.7, 1e-6)
     assertAlmostEquals(positions.slide, 0.03, 1e-6)
 })
+
+test("a description with several roots places every tree, not just the first", () => {
+    // A room with two robots standing in it. Each robot's own root is welded to nothing: TF puts it
+    // where it stands, which is why parseUsda leaves an articulated root unjoined. Walking only the
+    // first root left both robots' links out of linkPoses, and a link with no pose is one the viewer
+    // hides -- robots present in TF, in the description and in the mesh cache, and invisible.
+    const link = (name: string) => ({ name, visuals: [], collisions: [] })
+    const joint = (name: string, parent: string, child: string) => ({
+        name,
+        type: "revolute" as const,
+        parent,
+        child,
+        axis: [0, 0, 1] as [number, number, number],
+        origin: { xyz: [0, 0, 1] as [number, number, number], quat: [0, 0, 0, 1] as [number, number, number, number] },
+    })
+    const description = {
+        name: "room",
+        base_link: "world",
+        links: ["world", "a/base", "a/arm", "b/base", "b/arm"].map(link),
+        joints: [joint("a/j", "a/base", "a/arm"), joint("b/j", "b/base", "b/arm")],
+    }
+    const kinematics = new Kinematics(description as never)
+
+    assertEquals(kinematics.roots, ["world", "a/base", "b/base"])
+    const poses = kinematics.linkPoses({ "a/j": 0, "b/j": 0 })
+    assertEquals([...poses.keys()].sort(), ["a/arm", "a/base", "b/arm", "b/base", "world"])
+    assertAlmostEquals(poses.get("b/arm")!.elements[14], 1, 1e-6)
+})

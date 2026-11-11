@@ -3,7 +3,7 @@
 // forward kinematics from joint positions.
 import * as THREE from "three"
 
-type V3 = [number, number, number]
+export type V3 = [number, number, number]
 type Q = [number, number, number, number]
 
 export interface Origin {
@@ -20,6 +20,8 @@ export interface DescriptionGeometry {
     radius?: number
     length?: number
     color?: [number, number, number, number]
+    /** an image the bound material names (UsdUVTexture), to be fetched like a mesh file and tiled over this shape */
+    texture?: string
 }
 
 export interface DescriptionLink {
@@ -28,6 +30,49 @@ export interface DescriptionLink {
     collisions: DescriptionGeometry[]
     /** shown and hidden with the other links of its group (a URDF link's `<group>`, e.g. a sim's scene or people) */
     group?: string
+}
+
+/**
+ * A light the description carries, so a scene says how it is lit rather than leaving it to whoever draws it.
+ *
+ * `distant` has a direction and no position, like the sun; `point` has a position; `ambient` has neither and comes
+ * from every direction at once. `dome` is the sky: ambient light, and the thing you see when you look past the
+ * scene, so a viewer can paint it behind everything as well as light by it. `color` is linear RGB with the
+ * brightness taken out of it, which `intensity` carries instead.
+ */
+export interface DescriptionLight {
+    name: string
+    type: "distant" | "point" | "ambient" | "dome"
+    /** where it is, for a point light */
+    xyz: V3
+    /** where it shines, for a distant light */
+    direction: V3
+    color: [number, number, number]
+    intensity: number
+    shadow: boolean
+    /** the lamp's own size, in metres. A light with a face rather than a point throws a penumbra, and
+     * how wide it is comes from this; USD says it on every area light (`inputs:radius`). */
+    radius?: number
+}
+
+/**
+ * How a scene wants to be shown: the part of its look that is not geometry or lights.
+ *
+ * Filmic tone mapping rolls bright colour toward white, so a lit room loses most of its paint to the
+ * curve; `neutral` keeps the hue and gives up brightness instead. `saturation` and `contrast` are the
+ * grade applied after that, which is the difference between a render and a plain rasterised frame.
+ */
+export interface DescriptionLook {
+    toneMap?: "agx" | "neutral" | "filmic" | "linear" | "none"
+    exposure?: number
+    /** how strongly the dome's sky lights the room as an environment map (Blender's irradiance volumes, roughly) */
+    environmentIntensity?: number
+    /** how strongly to darken what is enclosed, standing in for the bounce light that never reaches it */
+    occlusion?: number
+    /** how far the occlusion reaches, in metres (Omniverse's /rtx/ambientOcclusion/rayLength) */
+    occlusionRadius?: number
+    saturation?: number
+    contrast?: number
 }
 
 export interface DescriptionJoint {
@@ -49,6 +94,10 @@ export interface RobotDescription {
     joint_names: string[]
     links: DescriptionLink[]
     joints: DescriptionJoint[]
+    /** what the layer says lights it, in world space; absent or empty means the viewer's own lighting stands */
+    lights?: DescriptionLight[]
+    /** how the layer asks to be shown; absent means the viewer's own look stands */
+    look?: DescriptionLook
 }
 
 const originMatrix = (origin: Origin) =>
@@ -67,6 +116,11 @@ export class Kinematics {
     readonly #order: DescriptionJoint[] = []
     readonly #origins = new Map<string, THREE.Matrix4>()
     readonly root: string
+    /** Every link no joint names as a child. A robot standing in a scene is one of these: its own root is
+     * placed by TF, not welded to the room, so the scene's description has one root per robot plus the
+     * room's. Walking only the first would leave every other robot's links with no pose at all, and a link
+     * with no pose is a link the viewer hides -- three robots present in TF and invisible on screen. */
+    readonly roots: readonly string[]
     readonly joints: Map<string, DescriptionJoint>
     /** the joint other joints mimic (an xArm's gripper drive_joint): what a gripper position drives */
     readonly gripperJoint: string | null
@@ -78,16 +132,23 @@ export class Kinematics {
             this.#origins.set(joint.name, originMatrix(joint.origin))
         }
         const children = new Set(description.joints.map((joint) => joint.child))
-        this.root = description.links.find((link) => !children.has(link.name))?.name ?? description.base_link
+        const roots = description.links.filter((link) => !children.has(link.name)).map((link) => link.name)
+        this.root = roots[0] ?? description.base_link
+        this.roots = roots.length ? roots : [this.root]
+        const walked = new Set<string>()
         const visit = (link: string) => {
             for (const joint of description.joints) {
-                if (joint.parent === link) {
+                // A joint reached twice would be ordered twice, and a cycle would never return.
+                if (joint.parent === link && !walked.has(joint.name)) {
+                    walked.add(joint.name)
                     this.#order.push(joint)
                     visit(joint.child)
                 }
             }
         }
-        visit(this.root)
+        for (const root of this.roots) {
+            visit(root)
+        }
         const mimicked = description.joints.map((joint) => joint.mimic?.joint).filter((name): name is string => !!name)
         this.gripperJoint = mimicked[0] ?? null
     }
@@ -103,7 +164,8 @@ export class Kinematics {
 
     /** Every link's pose relative to the root link. */
     linkPoses(positions: JointPositions): Map<string, THREE.Matrix4> {
-        const poses = new Map<string, THREE.Matrix4>([[this.root, new THREE.Matrix4()]])
+        // Each root at the origin of its own tree; a caller that knows where a root really is (TF) replaces it.
+        const poses = new Map<string, THREE.Matrix4>(this.roots.map((root) => [root, new THREE.Matrix4()]))
         const motion = new THREE.Matrix4()
         const axis = new THREE.Vector3()
         for (const joint of this.#order) {
