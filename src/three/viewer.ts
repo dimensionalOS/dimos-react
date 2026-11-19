@@ -446,7 +446,11 @@ export class Viewer {
                 ? new THREE.DirectionalLight(colour, light.intensity * DISTANT_GAIN)
                 : light.type === "ambient" || light.type === "dome"
                 ? hemisphereUp(
-                    new THREE.HemisphereLight(colour, colour.clone().multiplyScalar(0.4), light.intensity * AMBIENT_GAIN),
+                    new THREE.HemisphereLight(
+                        colour,
+                        colour.clone().multiplyScalar(0.4),
+                        light.intensity * AMBIENT_GAIN,
+                    ),
                 )
                 : new THREE.PointLight(
                     colour,
