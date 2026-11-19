@@ -1,4 +1,4 @@
-// Demo: tables, trees, key/value, stats, lists, logs, code, sparklines, timeline.
+// Demo: tables, trees, key/value, JSON values, stats, lists, logs, code, sparklines, timeline.
 import { useEffect, useRef, useState } from "react"
 import {
     AttitudeIndicator,
@@ -8,6 +8,8 @@ import {
     Card,
     CodeBlock,
     IconButton,
+    JsonLine,
+    JsonView,
     KeyValue,
     List,
     ListRow,
@@ -22,6 +24,19 @@ import {
     Timeline,
     Tree,
 } from "../../src/index.ts"
+
+const MODULE_CONFIG = {
+    max_speed: 0.8,
+    frame_id: "base_link",
+    use_imu: true,
+    sim: false,
+    goal_tolerance: [0.05, 0.1],
+    waypoints: [{ x: 1.25, y: -0.5 }, { x: 3, y: 2.125 }],
+    pid: { kp: 1.2, ki: 0, kd: 0.015 },
+    api_key: "•••",
+    note: "",
+    map_file: null,
+}
 
 interface DemoTopic {
     key: string
@@ -214,6 +229,12 @@ export function DataSection() {
                         ["Gateway", "zenoh-gateway 0.5.3"],
                     ]}
                 />
+            </Card>
+            <Card title="JsonView + JsonLine">
+                <JsonView value={MODULE_CONFIG} />
+                <div style={{ marginTop: 12, overflow: "hidden" }}>
+                    <JsonLine value={MODULE_CONFIG} budget={60} />
+                </div>
             </Card>
             <MediaDemo />
             <Card title="AttitudeIndicator">

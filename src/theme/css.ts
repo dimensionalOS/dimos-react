@@ -5,6 +5,7 @@ import { CONTROLS_CSS } from "../styles/controls.ts"
 import { FEEDBACK_CSS } from "../styles/feedback.ts"
 import { LAYOUT_CSS } from "../styles/layout.ts"
 import { DATA_CSS } from "../styles/data.ts"
+import { JSON_VIEW_CSS } from "../styles/json_view.ts"
 import { NAV_CSS } from "../styles/nav.ts"
 import { INPUT_DEVICES_CSS } from "../styles/input_devices.ts"
 import { SCENE_CSS } from "../styles/scene.ts"
@@ -23,6 +24,7 @@ export const COMPONENT_CSS = [
     FEEDBACK_CSS,
     LAYOUT_CSS,
     DATA_CSS,
+    JSON_VIEW_CSS,
     NAV_CSS,
     INPUT_DEVICES_CSS,
     SCENE_CSS,

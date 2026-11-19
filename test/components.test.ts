@@ -12,7 +12,7 @@ testGlobals.DOMParser ??= window.DOMParser
 testGlobals.NodeFilter ??= window.NodeFilter
 const { createElement: h } = await import("react")
 const { renderToStaticMarkup } = await import("react-dom/server")
-const { sanitizeHtml, Stepper, TagList, Tile } = await import("../src/index.ts")
+const { JsonLine, JsonView, sanitizeHtml, Stepper, TagList, Tile } = await import("../src/index.ts")
 
 test("sanitizeHtml drops what runs or restyles, keeps the prose", () => {
     const clean = sanitizeHtml(
@@ -62,4 +62,29 @@ test("Menu items pass their data-* / aria-* keys (and id) to their buttons", asy
         html,
     )
     assert(!html.includes("onSelect"), html)
+})
+
+test("JsonView: fields as a table, lists as chips, no braces or quotes", () => {
+    const html = renderToStaticMarkup(
+        h(JsonView, { value: { speed: 0.12345, on: false, tags: ["a"], none: null, text: "" } }),
+    )
+    assert(html.includes(`<span class="dr-json-key">speed</span>`), html)
+    assert(html.includes(">0.1235<") && html.includes("✗ false") && html.includes("empty text"), html)
+    assert(
+        html.includes(
+            `<ol class="dr-json-list dr-json-inline"><li class="dr-json-item"><span class="dr-json-str">a</span>`,
+        ),
+        html,
+    )
+    assert(!html.includes("{") && !html.includes(`"a"`), html)
+})
+
+test("JsonLine: one colored line, cut at its budget", () => {
+    const full = renderToStaticMarkup(h(JsonLine, { value: { a: [1, "x"] } })).replace(/<[^>]+>/g, "")
+    assertEquals(full, `{ a: [1, &quot;x&quot;] }`)
+    const cut = renderToStaticMarkup(h(JsonLine, { value: { a: "long text", b: 2, c: 3 }, budget: 8 })).replace(
+        /<[^>]+>/g,
+        "",
+    )
+    assert(cut.endsWith("…"), cut)
 })
