@@ -1,6 +1,10 @@
-// A USD layer's Meshes as one geometry, placed, triangulated and coloured per vertex by their material (no textures).
+// A USD layer's Meshes as one geometry, placed, triangulated, coloured per vertex and grouped by material (meshLooks).
 import * as THREE from "three"
-import { describeMaterials, type Prim, rendered, surfaceLook, xformOf } from "./usda.ts"
+import type { DescriptionGeometry } from "./description.ts"
+import { describeMaterials, type Prim, rendered, surfaceLook, textureCoordinates, xformOf } from "./usda.ts"
+
+/** One material of a mesh layer, for the geometry group of the same index: its colour, finish and texture. */
+export type MeshLook = Pick<DescriptionGeometry, "color" | "texture" | "roughness" | "metallic" | "ior">
 
 type Numbers = ArrayLike<number>
 
@@ -14,9 +18,37 @@ function numbersOf(prim: Prim, name: string): Numbers {
     return [...text.matchAll(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g)].map((match) => Number(match[0]))
 }
 
+/** A primvar's interpolation, from a crate's metadata or a text layer's (both kept as `<name>:interpolation`). */
 function interpolationOf(prim: Prim, name: string): string {
-    const value = prim.values?.[`${name}:interpolation`]
+    const value = prim.values?.[`${name}:interpolation`] ??
+        prim.attrs[`${name}:interpolation`]?.replace(/["']/g, "").trim()
     return typeof value === "string" ? value : "vertex"
+}
+
+/** `path` as named from the layer at `layer`: a relative path joined to the layer's directory, an absolute one as it is. */
+export function resolveAgainst(layer: string, path: string): string {
+    if (path.startsWith("/") || /^[a-z][a-z0-9+.-]*:/i.test(path)) return path
+    const base = layer.split("?")[0]
+    // a URL's scheme and host (`package://pkg`) stay as they are; only the path after them is normalized
+    const origin = base.match(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i)?.[0] ?? ""
+    const joined = base.slice(origin.length, base.lastIndexOf("/") + 1) + path
+    const out: string[] = []
+    for (const part of joined.split("/")) {
+        if (part === "." || (part === "" && out.length)) continue
+        if (part === ".." && out.length && out[out.length - 1] !== ".." && out[out.length - 1] !== "") out.pop()
+        else out.push(part)
+    }
+    return origin + out.join("/")
+}
+
+/** The materials of a mesh layer's geometry, one per group (usdMeshGeometry), or none for any other geometry. */
+export function meshLooks(geometry: THREE.BufferGeometry): MeshLook[] {
+    return (geometry.userData.looks as MeshLook[] | undefined) ?? []
+}
+
+/** Every image a mesh layer's materials name, once each, as paths resolved against the layer's own. */
+export function meshTextures(geometry: THREE.BufferGeometry): string[] {
+    return [...new Set(meshLooks(geometry).map((look) => look.texture).filter((uri): uri is string => !!uri))]
 }
 
 function matrixOf(prim: Prim): THREE.Matrix4 {
@@ -34,15 +66,16 @@ function matrixOf(prim: Prim): THREE.Matrix4 {
     return matrix
 }
 
-/** Every rendered Mesh under `roots` as one non-indexed geometry, with normals, uvs where every part has them, and colours. */
-export function usdMeshGeometry(roots: Prim[]): THREE.BufferGeometry {
+/** Every rendered Mesh under `roots` as one non-indexed geometry, a group per material, its texture resolved against `layer`. */
+export function usdMeshGeometry(roots: Prim[], layer = ""): THREE.BufferGeometry {
     describeMaterials(roots)
-    const positions: number[] = []
-    const normals: number[] = []
-    const uvs: number[] = []
-    const colors: number[] = []
+    // each material's triangles apart, so the geometry's groups are runs of one material
+    const parts = new Map<
+        string,
+        { look: MeshLook; positions: number[]; normals: number[]; uvs: number[]; colors: number[] }
+    >()
     let allNormals = true
-    let allUvs = true
+    let anyUvs = false
     const visit = (prim: Prim) => {
         if (prim.type === "Mesh" && rendered(prim)) addMesh(prim)
         prim.children.forEach(visit)
@@ -56,17 +89,29 @@ export function usdMeshGeometry(roots: Prim[]): THREE.BufferGeometry {
         const turn = new THREE.Matrix3().getNormalMatrix(matrix)
         const normal = numbersOf(prim, "normals")
         const normalBy = interpolationOf(prim, "normals")
-        const st = numbersOf(prim, "primvars:st")
-        const stIndices = numbersOf(prim, "primvars:st:indices")
-        const stBy = interpolationOf(prim, "primvars:st")
-        const look = surfaceLook(prim)
+        // the primvar the material's texture reads, else USD's conventional name for texture coordinates
+        const coordinates = `primvars:${textureCoordinates(prim) ?? "st"}`
+        const st = numbersOf(prim, coordinates)
+        const stIndices = numbersOf(prim, `${coordinates}:indices`)
+        const stBy = interpolationOf(prim, coordinates)
+        const surface = surfaceLook(prim)
         // Hydra's fallback displayColor for a prim with neither material nor displayColor (pxr usdImaging)
-        const color = look.color ?? [0.18, 0.18, 0.18, 1]
+        const color = surface.color ?? [0.18, 0.18, 0.18, 1]
+        const look: MeshLook = {
+            color,
+            ...(surface.texture ? { texture: resolveAgainst(layer, surface.texture) } : {}),
+            ...(surface.roughness !== undefined ? { roughness: surface.roughness } : {}),
+            ...(surface.metallic !== undefined ? { metallic: surface.metallic } : {}),
+            ...(surface.ior !== undefined ? { ior: surface.ior } : {}),
+        }
+        const key = JSON.stringify(look)
+        if (!parts.has(key)) parts.set(key, { look, positions: [], normals: [], uvs: [], colors: [] })
+        const { positions, normals, uvs, colors } = parts.get(key)!
         const leftHanded = (prim.attrs["orientation"] ?? "").includes("leftHanded")
         const hasNormals = normal.length > 0
         const hasUvs = st.length > 0
         allNormals &&= hasNormals
-        allUvs &&= hasUvs
+        anyUvs ||= hasUvs
         const point = new THREE.Vector3()
         const direction = new THREE.Vector3()
         // the value an attribute has at one corner: per vertex, per face-vertex (the corner's running index), or per face
@@ -105,12 +150,21 @@ export function usdMeshGeometry(roots: Prim[]): THREE.BufferGeometry {
         }
     }
     roots.forEach(visit)
+    const all = [...parts.values()]
+    const joined = (field: "positions" | "normals" | "uvs" | "colors") => all.flatMap((part) => part[field])
+    const positions = joined("positions")
     if (!positions.length) throw new Error("no meshes in the layer")
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
-    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3))
-    if (allUvs) geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
-    if (allNormals) geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3))
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(joined("colors"), 3))
+    if (anyUvs) geometry.setAttribute("uv", new THREE.Float32BufferAttribute(joined("uvs"), 2))
+    if (allNormals) geometry.setAttribute("normal", new THREE.Float32BufferAttribute(joined("normals"), 3))
     else geometry.computeVertexNormals()
+    let start = 0
+    for (const [index, part] of all.entries()) {
+        geometry.addGroup(start, part.positions.length / 3, index)
+        start += part.positions.length / 3
+    }
+    geometry.userData.looks = all.map((part) => part.look)
     return geometry
 }

@@ -658,6 +658,70 @@ test("a crate's meshes come back placed, triangulated and in their material's co
     assertAlmostEquals(geometry.attributes.color.getY(0), 0.1, 1e-6)
 })
 
+for (const kind of ["usdc", "usda"]) {
+    test(`a ${kind} mesh layer's textured material reads its own primvar and names its image beside the layer`, async () => {
+        const { meshGeometry } = await import("../src/three/urdf/parse.ts")
+        const { meshLooks, meshTextures } = await import("../src/three/urdf/usd_mesh.ts")
+        // written by pxr: a quad reading ../textures/wood.png through primvars:uvmap (faceVarying, indexed), a red one
+        const geometry = meshGeometry(
+            `/dimos/assets/room/geometry/textured.${kind}`,
+            new Uint8Array(readFileSync(new URL(`./fixtures/textured.${kind}`, import.meta.url))),
+        )
+        assertEquals(meshTextures(geometry), ["/dimos/assets/room/textures/wood.png"])
+        const looks = meshLooks(geometry)
+        assertEquals(looks.map((look) => look.texture), ["/dimos/assets/room/textures/wood.png", undefined])
+        // the texture's scale is what multiplies it; the other material keeps its own colour
+        assertEquals(looks[0].color, [0.5, 0.25, 1, 1])
+        assertAlmostEquals(looks[0].roughness!, 0.7, 1e-6)
+        assertAlmostEquals(looks[1].color![0], 0.8, 1e-6)
+        assertEquals(geometry.groups.map(({ start, count, materialIndex }) => [start, count, materialIndex]), [
+            [0, 6, 0],
+            [6, 6, 1],
+        ])
+        assertEquals(Array.from(geometry.attributes.uv.array.slice(0, 12)), [
+            0,
+            0,
+            0.5,
+            0,
+            0.5,
+            0.25,
+            0,
+            0,
+            0.5,
+            0.25,
+            0,
+            0.25,
+        ])
+    })
+}
+
+test("a texture path resolves against the layer naming it, as dimos serves it", async () => {
+    const { resolveAgainst } = await import("../src/three/urdf/usd_mesh.ts")
+    assertEquals(resolveAgainst("/dimos/assets/a/geometry/x.usdc", "t.png"), "/dimos/assets/a/geometry/t.png")
+    assertEquals(resolveAgainst("/dimos/assets/a/geometry/x.usdc", "./../t.png"), "/dimos/assets/a/t.png")
+    assertEquals(resolveAgainst("package://pkg/meshes/x.usdc?hash=1", "../t.png"), "package://pkg/t.png")
+    assertEquals(resolveAgainst("x.usdc", "t.png"), "t.png")
+    assertEquals(resolveAgainst("/a/x.usdc", "/b/t.png"), "/b/t.png")
+})
+
+test("an attribute's own metadata stays with it, not with its prim", () => {
+    const [mesh] = parsePrims(`#usda 1.0
+def Mesh "m"
+{
+    texCoord2f[] primvars:st = [(0, 0)] (
+        interpolation = "faceVarying"
+    )
+    float inputs:roughness = 0.5 (
+        doc = "x"
+    )
+}
+`)
+    assertEquals(mesh.attrs["primvars:st"], "[(0, 0)]")
+    assertEquals(mesh.attrs["primvars:st:interpolation"], '"faceVarying"')
+    assertEquals(mesh.attrs["inputs:roughness"], "0.5")
+    assertEquals(mesh.attrs["interpolation"], undefined)
+})
+
 test("lights keep their exposure, normalize and size", () => {
     const lights = parseUsda(`#usda 1.0
 def Xform "w"

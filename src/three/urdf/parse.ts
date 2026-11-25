@@ -225,9 +225,9 @@ export function meshGeometry(uri: string, data: Uint8Array): THREE.BufferGeometr
         collada.scene.rotation.set(0, 0, 0)
         geometry = mergedMeshes(collada.scene)
     } else if (extension === "usdc" || extension === "usd" && isUsdc(data)) {
-        geometry = usdMeshGeometry(parseUsdc(data).roots)
+        geometry = usdMeshGeometry(parseUsdc(data).roots, uri)
     } else if (extension === "usda" || extension === "usd") {
-        geometry = usdMeshGeometry(parsePrims(new TextDecoder().decode(data)))
+        geometry = usdMeshGeometry(parsePrims(new TextDecoder().decode(data)), uri)
     } else {
         throw new Error(`unsupported mesh format .${extension}`)
     }

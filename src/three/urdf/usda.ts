@@ -207,7 +207,13 @@ export function parsePrims(text: string): Prim[] {
                 const { key, value } = token
                 const variantSet = key.match(/^variantSet\s+"([^"]*)"$/)
                 if (variantSet) (prim.variantBodies ??= {})[variantSet[1]] = variantsIn(value)
-                else prim.attrs[attributeName(key)] = value
+                else {
+                    const name = attributeName(key)
+                    prim.attrs[name] = value
+                    // kept as `<attribute>:<key>`, the name a crate's attribute metadata is read into (usdc.ts)
+                    const meta = token.meta ? parseAssignments(token.meta) : {}
+                    for (const [field, said] of Object.entries(meta)) prim.attrs[`${name}:${field}`] = said
+                }
             }
             index += 1
         }
@@ -255,7 +261,7 @@ function applyVariants(prim: Prim): void {
 
 type Token =
     | { kind: "def"; primType: string; name: string; meta?: string }
-    | { kind: "assign"; key: string; value: string }
+    | { kind: "assign"; key: string; value: string; meta?: string }
     | { kind: "close" }
 
 /** The layer as a flat list of prim openings, closings and assignments, with every string skipped whole. */
@@ -287,7 +293,7 @@ function scan(text: string): Token[] {
             at = next.end
             continue
         }
-        tokens.push({ kind: "assign", key: next.key, value: next.value })
+        tokens.push({ kind: "assign", key: next.key, value: next.value, ...(next.meta ? { meta: next.meta } : {}) })
         at = next.end
     }
     return tokens
@@ -408,8 +414,26 @@ function readAssignment(text: string, from: number, equals: number): Found {
     else {
         const stringEnd = stringAt(text, at)
         end = stringEnd !== -1 ? stringEnd : lineEnd(text, at)
+        // a plain value stops at its own metadata's `(`, which no plain value holds
+        const paren = text.slice(at, end).indexOf("(")
+        if (stringEnd === -1 && paren !== -1) end = at + paren
     }
-    return { kind: "assign", end, body: true, primType: "", name: "", key, value: text.slice(at, end).trim() }
+    const value = text.slice(at, end).trim()
+    // the attribute's own metadata, `= [...] ( interpolation = "faceVarying" )`, belongs to it and not to the prim
+    let after = end
+    while (after < text.length && (text[after] === " " || text[after] === "\t")) after += 1
+    if (text[after] !== "(") return { kind: "assign", end, body: true, primType: "", name: "", key, value }
+    const close = matching(text, after, "(", ")")
+    return {
+        kind: "assign",
+        end: close + 1,
+        body: true,
+        primType: "",
+        name: "",
+        key,
+        value,
+        meta: text.slice(after + 1, close),
+    }
 }
 
 /** The index just past the string starting at `at`, or -1 when there is none. Handles `'''`, `"""`, `"`, `'` and `@`. */
@@ -648,6 +672,8 @@ interface Surface {
     color?: [number, number, number]
     /** the image its diffuseColor reads, when it reads one */
     texture?: string
+    /** the primvar that image's coordinates come from (its UsdPrimvarReader_float2's varname) */
+    coordinates?: string
     opacity?: number
     roughness?: number
     metallic?: number
@@ -689,6 +715,7 @@ function surfaceOf(material: Prim, byPath: Map<string, Prim>): Surface {
     const diffuse = inputOf(shader, "inputs:diffuseColor", byPath)
     if (diffuse?.texture) {
         out.texture = diffuse.texture
+        if (diffuse.coordinates) out.coordinates = diffuse.coordinates
         // the texture's scale multiplies what it reads, which is what three's colour does to a map
         const scale = diffuse.scale ?? []
         out.color = scale.length >= 3 ? [scale[0], scale[1], scale[2]] : [1, 1, 1]
@@ -721,19 +748,43 @@ function inputOf(
     name: string,
     byPath: Map<string, Prim>,
     depth = 0,
-): { value?: number[]; texture?: string; scale?: number[] } | null {
+): { value?: number[]; texture?: string; scale?: number[]; coordinates?: string } | null {
     const connection = connectionOf(prim.attrs[`${name}.connect`])
     if (connection && depth < 8) {
         const source = byPath.get(connection.prim)
         if (!source) return null
         if (unquote(source.attrs["info:id"] ?? "") === "UsdUVTexture" && connection.attribute.startsWith("outputs:")) {
             const file = (source.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)?.[1]
-            return file ? { texture: file, scale: numbers(source.attrs["inputs:scale"]) } : null
+            const coordinates = primvarRead(source, byPath)
+            return file
+                ? {
+                    texture: file,
+                    scale: numbers(source.attrs["inputs:scale"]),
+                    ...(coordinates ? { coordinates } : {}),
+                }
+                : null
         }
         return inputOf(source, connection.attribute, byPath, depth + 1)
     }
     const value = prim.attrs[name]
     return value === undefined ? null : { value: numbers(value) }
+}
+
+/** The primvar a UsdUVTexture's `inputs:st` reads: its UsdPrimvarReader_float2's varname, through any interface input. */
+function primvarRead(texture: Prim, byPath: Map<string, Prim>): string | undefined {
+    const reader = connectionOf(texture.attrs["inputs:st.connect"])
+    let at = reader ? byPath.get(reader.prim) : undefined
+    let name = "inputs:varname"
+    for (let depth = 0; at && depth < 8; depth++) {
+        const next = connectionOf(at.attrs[`${name}.connect`])
+        if (!next) {
+            const value = at.attrs[name]
+            return value === undefined ? undefined : unquote(value)
+        }
+        at = byPath.get(next.prim)
+        name = next.attribute
+    }
+    return undefined
 }
 
 /** The material bound to a prim or, failing that, to the nearest ancestor that binds one. */
@@ -743,6 +794,11 @@ function boundSurface(prim: Prim): Surface | undefined {
         if (bound) return surfaces.get(bound[1])
     }
     return undefined
+}
+
+/** The primvar a prim's bound material reads its texture's coordinates from, if it names one. */
+export function textureCoordinates(prim: Prim): string | undefined {
+    return boundSurface(prim)?.coordinates
 }
 
 /** How a geometry draws: its bound material wins over displayColor, as USD has it (displayColor is the no-material fallback). */

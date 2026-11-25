@@ -1,0 +1,75 @@
+#usda 1.0
+(
+    defaultPrim = "geometry"
+    upAxis = "Z"
+)
+
+def Xform "geometry"
+{
+    def Mesh "wood" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </geometry/wood_material>
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        texCoord2f[] primvars:uvmap = [(0.5, 0.25), (0, 0), (0.5, 0), (0, 0.25)] (
+            interpolation = "faceVarying"
+        )
+        int[] primvars:uvmap:indices = [1, 2, 0, 3]
+    }
+
+    def Material "wood_material"
+    {
+        token inputs:frame:stPrimvarName = "uvmap"
+        token outputs:surface.connect = </geometry/wood_material/surface.outputs:surface>
+
+        def Shader "surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor.connect = </geometry/wood_material/texture.outputs:rgb>
+            float inputs:roughness = 0.7
+            token outputs:surface
+        }
+
+        def Shader "reader"
+        {
+            uniform token info:id = "UsdPrimvarReader_float2"
+            token inputs:varname.connect = </geometry/wood_material.inputs:frame:stPrimvarName>
+            float2 outputs:result
+        }
+
+        def Shader "texture"
+        {
+            uniform token info:id = "UsdUVTexture"
+            asset inputs:file = @../textures/wood.png@
+            float4 inputs:scale = (0.5, 0.25, 1, 1)
+            float2 inputs:st.connect = </geometry/wood_material/reader.outputs:result>
+            color3f outputs:rgb
+        }
+    }
+
+    def Mesh "red" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        rel material:binding = </geometry/red_material>
+        point3f[] points = [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+    }
+
+    def Material "red_material"
+    {
+        token outputs:surface.connect = </geometry/red_material/surface.outputs:surface>
+
+        def Shader "surface"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+            token outputs:surface
+        }
+    }
+}
+
