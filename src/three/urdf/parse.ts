@@ -7,6 +7,9 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js"
 import { ColladaLoader } from "three/examples/jsm/loaders/ColladaLoader.js"
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js"
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js"
+import { parsePrims } from "./usda.ts"
+import { isUsdc, parseUsdc } from "./usdc.ts"
+import { usdMeshGeometry } from "./usd_mesh.ts"
 import { type DescriptionGeometry, type DescriptionJoint, type Origin, type RobotDescription } from "./description.ts"
 
 type V3 = [number, number, number]
@@ -153,6 +156,7 @@ export function meshUris(description: RobotDescription): string[] {
     // draws untextured for ever.
     const uris = description.links.flatMap((link) => [...link.visuals, ...link.collisions])
         .flatMap((item) => [item.mesh, item.texture])
+        .concat((description.lights ?? []).map((light) => light.texture))
         .filter((uri): uri is string => !!uri)
     return [...new Set(uris)]
 }
@@ -174,19 +178,24 @@ export function decodeMeshFile(bytes: Uint8Array): { ts: number; uri: string; da
     }
 }
 
-/** The meshes of an OBJ or DAE scene as one geometry (positions only, in the scene's frame; materials dropped). */
+/** An OBJ or DAE scene's meshes as one geometry: positions, and uvs when every part has them (a map needs them). */
 function mergedMeshes(scene: THREE.Object3D): THREE.BufferGeometry {
     scene.updateMatrixWorld(true)
     const parts: THREE.BufferGeometry[] = []
+    const meshes: THREE.Mesh[] = []
     scene.traverse((object) => {
         const mesh = object as THREE.Mesh
-        if (mesh.isMesh && mesh.geometry.attributes.position) {
-            const part = new THREE.BufferGeometry()
-            part.setAttribute("position", mesh.geometry.attributes.position.clone())
-            part.setIndex(mesh.geometry.index ? mesh.geometry.index.clone() : null)
-            parts.push(part.applyMatrix4(mesh.matrixWorld).toNonIndexed())
-        }
+        if (mesh.isMesh && mesh.geometry.attributes.position) meshes.push(mesh)
     })
+    const withUvs = meshes.length > 0 && meshes.every((mesh) => mesh.geometry.attributes.uv)
+    for (const mesh of meshes) {
+        const part = new THREE.BufferGeometry()
+        part.setAttribute("position", mesh.geometry.attributes.position.clone())
+        if (withUvs) part.setAttribute("uv", mesh.geometry.attributes.uv.clone())
+        part.setIndex(mesh.geometry.index ? mesh.geometry.index.clone() : null)
+        part.applyMatrix4(mesh.matrixWorld)
+        parts.push(part.index ? part.toNonIndexed() : part)
+    }
     if (!parts.length) {
         throw new Error("no meshes in the file")
     }
@@ -196,7 +205,7 @@ function mergedMeshes(scene: THREE.Object3D): THREE.BufferGeometry {
     return merged
 }
 
-/** A mesh file (STL binary or ASCII, OBJ, DAE, PLY) as a BufferGeometry in meters, its kind told by the URI's extension. */
+/** A mesh file (STL binary or ASCII, OBJ, DAE, PLY, a USD layer of meshes) as a BufferGeometry in meters, its kind told by the URI's extension. */
 export function meshGeometry(uri: string, data: Uint8Array): THREE.BufferGeometry {
     const extension = uri.split("?")[0].split(".").pop()?.toLowerCase()
     const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer
@@ -215,6 +224,10 @@ export function meshGeometry(uri: string, data: Uint8Array): THREE.BufferGeometr
         // ColladaLoader turns a Z_UP file Y-up for three; a URDF's link frames are already Z-up.
         collada.scene.rotation.set(0, 0, 0)
         geometry = mergedMeshes(collada.scene)
+    } else if (extension === "usdc" || extension === "usd" && isUsdc(data)) {
+        geometry = usdMeshGeometry(parseUsdc(data).roots)
+    } else if (extension === "usda" || extension === "usd") {
+        geometry = usdMeshGeometry(parsePrims(new TextDecoder().decode(data)))
     } else {
         throw new Error(`unsupported mesh format .${extension}`)
     }

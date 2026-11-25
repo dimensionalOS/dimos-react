@@ -45,32 +45,3 @@ export function aimShadow(light: THREE.DirectionalLight, box: THREE.Box3) {
     camera.far = 2 * extent + 2 * SHADOW_MIN_EXTENT_METRES
     camera.updateProjectionMatrix()
 }
-
-/** How many of a scene's own lamps may cast. A point light's shadow is a cube -- six renders of
- * the scene every frame -- so eighteen ceiling fittings would be a hundred and eight. The few
- * strongest are what a room's shape reads from; the rest still light it, they just do not occlude. */
-export const MAX_SHADOW_LAMPS = 4
-
-/** A lamp inside the room: a near shadow, cheap enough that a handful can afford one. */
-export function lampCastsShadow(light: THREE.PointLight, reach: number, size = 0) {
-    light.castShadow = true
-    // 1024 was tried for the banding below and is not worth it: four lamps of cube map at that size
-    // is a hundred megabytes of shadow texture, and asking for it cost the standard-material shader
-    // program its link -- every mesh in the room vanished while the grid, on a line material, stayed.
-    light.shadow.mapSize.set(512, 512)
-    light.shadow.bias = -0.004
-    // a cube face covers a quarter-turn, so one texel is ~0.1 deg; the offset is set from that at
-    // the far end of the lamp's reach rather than from the scene, which is what a room-sized
-    // directional bias would be, and generously, because banding on a desk top is far more obvious
-    // than a shadow sitting a centimetre off the thing that casts it
-    light.shadow.normalBias = Math.max(0.05, reach * 0.012)
-    // A lamp with a face throws a penumbra; a mathematical point throws a hard edge, which is the
-    // single most renderer-looking thing about a rasterised room. USD states the size, so the blur
-    // follows it rather than being picked: a wider fitting, a softer edge. PCF counts the radius in
-    // shadow-map texels, so it scales with the map.
-    light.shadow.radius = size > 0 ? Math.min(12, Math.max(2, size * 60)) : 3
-    const camera = light.shadow.camera
-    camera.near = 0.15
-    camera.far = reach
-    camera.updateProjectionMatrix()
-}

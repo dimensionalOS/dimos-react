@@ -12,7 +12,8 @@ export interface Origin {
 }
 
 export interface DescriptionGeometry {
-    type: "mesh" | "box" | "cylinder" | "sphere"
+    /** `plane`: a flat `size[0]` by `size[1]` face in the origin's xy, facing its +z */
+    type: "mesh" | "box" | "cylinder" | "sphere" | "plane"
     origin: Origin
     mesh?: string
     scale?: V3
@@ -22,6 +23,11 @@ export interface DescriptionGeometry {
     color?: [number, number, number, number]
     /** an image the bound material names (UsdUVTexture), to be fetched like a mesh file and tiled over this shape */
     texture?: string
+    /** the bound material's UsdPreviewSurface finish, where it states one */
+    roughness?: number
+    metallic?: number
+    /** index of refraction: 1 is no interface at all, so no reflection (UsdPreviewSurface's default is 1.5) */
+    ior?: number
 }
 
 export interface DescriptionLink {
@@ -42,17 +48,31 @@ export interface DescriptionLink {
  */
 export interface DescriptionLight {
     name: string
-    type: "distant" | "point" | "ambient" | "dome"
-    /** where it is, for a point light */
+    /** UsdLux's: DistantLight, SphereLight (`point`), RectLight, DiskLight, DomeLight; `ambient` lights from everywhere */
+    type: "distant" | "point" | "ambient" | "dome" | "rect" | "disk"
+    /** where it is, for a point or area light */
     xyz: V3
+    /** how it is turned (x, y, z, w): an area light's face is its xy, shining down its -z */
+    quat?: [number, number, number, number]
     /** where it shines, for a distant light */
     direction: V3
     color: [number, number, number]
+    /** UsdLux's `inputs:intensity`, as authored */
     intensity: number
+    /** `inputs:exposure`: the intensity is scaled by 2^exposure */
+    exposure?: number
+    /** `inputs:normalize`: the light's power does not change with its size */
+    normalize?: boolean
     shadow: boolean
-    /** the lamp's own size, in metres. A light with a face rather than a point throws a penumbra, and
-     * how wide it is comes from this; USD says it on every area light (`inputs:radius`). */
+    /** a distant light's angular size, in degrees (`inputs:angle`) */
+    angle?: number
+    /** a rect light's size, in metres */
+    width?: number
+    height?: number
+    /** a disk or sphere light's radius, in metres (`inputs:radius`) */
     radius?: number
+    /** a dome's picture of the sky (`inputs:texture:file`), fetched like a mesh file */
+    texture?: string
 }
 
 /**

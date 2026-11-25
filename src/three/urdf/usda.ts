@@ -33,6 +33,10 @@ export interface Prim {
     attrs: Record<string, string>
     children: Prim[]
     parent?: Prim
+    /** values read from a crate (.usdc) as they are, by attribute name: big arrays stay typed instead of becoming text */
+    values?: Record<string, unknown>
+    /** `variantSet "name" = { "choice" { ... } }`, each choice's body as text, until the selected one is applied */
+    variantBodies?: Record<string, Record<string, string>>
 }
 
 const RIGID_BODY = "PhysicsRigidBodyAPI"
@@ -62,33 +66,51 @@ export function parseUsda(text: string): RobotDescription {
     if (!isUsda(text)) {
         throw new Error("not a USD layer: no #usda header")
     }
-    const roots = parsePrims(text)
+    return describe(parsePrims(text), defaultPrimName(text))
+}
+
+/** The prims of a layer (text or crate) as a RobotDescription. */
+export function describe(roots: Prim[], defaultPrim: string | null): RobotDescription {
     indexMaterials(roots)
     const links: DescriptionLink[] = []
     const prims: Prim[] = []
-    const sceneRoot = rootFrame(roots, defaultPrimName(text))
+    const sceneRoot = rootFrame(roots, defaultPrim)
+    const shapes = new Map<
+        Prim,
+        { visuals: DescriptionGeometry[]; collisions: DescriptionGeometry[]; drawable: DescriptionGeometry[] }
+    >()
     walk(roots, (prim) => {
         if (isLink(prim) || prim === sceneRoot) {
             prims.push(prim)
-            const collisions = geometriesOf(prim, true)
-            const visuals = geometriesOf(prim, false)
-            links.push({
-                name: frameName(prim),
-                // A URDF draws one shape and collides another, so a link with both shows the visual and keeps the
-                // collider to itself. MuJoCo usually collides the very shape it draws: a wall is a collider and
-                // nothing else, and taking that to mean "do not draw" lost every wall, floor and slab of a
-                // converted room while leaving the furniture, which happens to carry separate visual meshes. With
-                // nothing else to show for a link, the collider is what the thing looks like.
-                visuals: visuals.length > 0 ? visuals : collisions,
-                collisions,
-            })
+            shapes.set(prim, { visuals: [], collisions: [], drawable: [] })
         }
     })
+    for (const { prim, owner } of geometryPrims(roots, sceneRoot)) {
+        const into = shapes.get(owner)
+        const geometry = into ? geometryOf(prim, owner) : null
+        if (!into || !geometry) continue
+        const hidden = !rendered(prim)
+        if ((prim.meta["apiSchemas"] ?? "").includes("PhysicsCollisionAPI")) {
+            into.collisions.push(geometry)
+            if (!hidden) into.drawable.push(geometry)
+        } else if (!hidden) {
+            into.visuals.push(geometry)
+        }
+    }
+    for (const prim of prims) {
+        const { visuals, collisions, drawable } = shapes.get(prim)!
+        links.push({
+            name: frameName(prim),
+            // a URDF link shows its visual; a MuJoCo geom with none is drawn as its collider, unless USD calls it a guide
+            visuals: visuals.length > 0 ? visuals : drawable,
+            collisions,
+        })
+    }
     const joints = jointsOf(roots, prims, sceneRoot)
     const childLinks = new Set(joints.map((joint) => joint.child))
     const root = links.find((link) => !childLinks.has(link.name))?.name ?? links[0]?.name ?? ""
     return {
-        name: defaultPrimName(text) ?? roots[0]?.name ?? "robot",
+        name: defaultPrim ?? roots[0]?.name ?? "robot",
         base_link: root,
         base_frame: root,
         base_pose: { xyz: [0, 0, 0], quat: [0, 0, 0, 1] },
@@ -183,12 +205,52 @@ export function parsePrims(text: string): Prim[] {
             const prim = stack[stack.length - 1]
             if (prim) {
                 const { key, value } = token
-                prim.attrs[attributeName(key)] = value
+                const variantSet = key.match(/^variantSet\s+"([^"]*)"$/)
+                if (variantSet) (prim.variantBodies ??= {})[variantSet[1]] = variantsIn(value)
+                else prim.attrs[attributeName(key)] = value
             }
             index += 1
         }
     }
+    walk(roots, applyVariants)
     return roots
+}
+
+/** `{ "a" ( ... ) { body } "b" { body } }` as each choice's body. */
+function variantsIn(block: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    let at = block.indexOf("{") + 1
+    while (at < block.length) {
+        at = skipBlanks(block, at)
+        const end = stringAt(block, at)
+        if (end === -1) break
+        const name = block.slice(at + 1, end - 1)
+        at = skipBlanks(block, end)
+        if (block[at] === "(") at = skipBlanks(block, matching(block, at, "(", ")") + 1)
+        if (block[at] !== "{") break
+        const close = matching(block, at, "{", "}")
+        out[name] = block.slice(at + 1, close)
+        at = close + 1
+    }
+    return out
+}
+
+/** The selected variant of each set (`variants = { string set = "choice" }`, else its first) composed into the prim. */
+function applyVariants(prim: Prim): void {
+    if (!prim.variantBodies) return
+    const selected = parseAssignments((prim.meta["variants"] ?? "").replace(/^\s*\{|\}\s*$/g, ""))
+    for (const [set, choices] of Object.entries(prim.variantBodies)) {
+        const choice = selected[set] !== undefined ? unquote(selected[set]) : Object.keys(choices)[0]
+        const body = choices[choice]
+        if (body === undefined) continue
+        const [parsed] = parsePrims(`def "variant"\n{\n${body}\n}\n`)
+        for (const [name, value] of Object.entries(parsed?.attrs ?? {})) prim.attrs[name] ??= value
+        for (const child of parsed?.children ?? []) {
+            child.parent = prim
+            prim.children.push(child)
+        }
+    }
+    delete prim.variantBodies
 }
 
 type Token =
@@ -462,21 +524,97 @@ function numbers(value: string | undefined): number[] {
     return [...value.matchAll(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g)].map((match) => Number(match[0]))
 }
 
+/** A prim's own transform: where it is, how it is turned, and how it is scaled, from its xformOpOrder. */
+export interface Placement extends Origin {
+    scale: [number, number, number]
+}
+
+const IDENTITY: Placement = { xyz: [0, 0, 0], quat: [0, 0, 0, 1], scale: [1, 1, 1] }
+
 /** A prim's own transform, as the origin a URDF would state. */
 function placementOf(prim: Prim): Origin {
-    const matrix = numbers(prim.attrs["xformOp:transform"])
-    // USD writes a matrix4d row by row, and the translation is its last row.
-    if (matrix.length >= 16) return { xyz: [matrix[12], matrix[13], matrix[14]], quat: quatFromRows(matrix) }
-    // A hand-written layer usually places a prim with translate/orient rather than one matrix,
-    // and USD treats the two as equally normal. Reading only the matrix left every such prim at
-    // the origin -- three robots standing 1.2 m apart rendered on top of each other, with
-    // nothing to say they had been moved.
-    const translate = numbers(prim.attrs["xformOp:translate"])
-    const orient = numbers(prim.attrs["xformOp:orient"])
+    const { xyz, quat } = xformOf(prim)
+    return { xyz, quat }
+}
+
+/** A prim's xformOps composed in xformOpOrder (first outermost), with scale kept innermost as the shape's size. */
+export function xformOf(prim: Prim): Placement {
+    const order = [...(prim.attrs["xformOpOrder"] ?? "").matchAll(/"([^"]+)"/g)].map((match) => match[1])
+    // a layer that states ops without an order (older dimos layers) is read in the usual one
+    const ops = order.length > 0
+        ? order
+        : ["xformOp:transform", "xformOp:translate", "xformOp:orient", "xformOp:scale"].filter((op) => op in prim.attrs)
+    let out: Placement = IDENTITY
+    let scale: [number, number, number] = [1, 1, 1]
+    for (const op of ops) {
+        const inverse = op.startsWith("!invert!")
+        const name = inverse ? op.slice(8) : op
+        if (inverse || name === "!resetXformStack!") continue
+        const placed = opPlacement(name, numbers(prim.attrs[name]))
+        // a scale is the shape's size, innermost wherever it is listed: dimos lists it first, before the transform
+        if (name.split(":")[1] === "scale") scale = placed.scale
+        else out = composePlacement(out, placed)
+    }
+    return { ...out, scale: [out.scale[0] * scale[0], out.scale[1] * scale[1], out.scale[2] * scale[2]] }
+}
+
+function opPlacement(name: string, value: number[]): Placement {
+    const kind = name.split(":")[1] ?? ""
+    const degrees = Math.PI / 180
+    const about = (axis: 0 | 1 | 2, angle: number): [number, number, number, number] => {
+        const q: [number, number, number, number] = [0, 0, 0, Math.cos(angle * degrees / 2)]
+        q[axis] = Math.sin(angle * degrees / 2)
+        return q
+    }
+    if (kind === "translate" && value.length >= 3) return { ...IDENTITY, xyz: [value[0], value[1], value[2]] }
+    // USD writes a quatf as (w, x, y, z); three wants (x, y, z, w).
+    if (kind === "orient" && value.length >= 4) return { ...IDENTITY, quat: [value[1], value[2], value[3], value[0]] }
+    if (kind === "scale") {
+        return {
+            ...IDENTITY,
+            scale: value.length >= 3 ? [value[0], value[1], value[2]] : [value[0] ?? 1, value[0] ?? 1, value[0] ?? 1],
+        }
+    }
+    if (kind === "rotateX" || kind === "rotateY" || kind === "rotateZ") {
+        return { ...IDENTITY, quat: about("XYZ".indexOf(kind[6]) as 0 | 1 | 2, value[0] ?? 0) }
+    }
+    const rotation = kind.match(/^rotate([XYZ]{3})$/)
+    if (rotation && value.length >= 3) {
+        // rotateXYZ turns about X first, then Y, then Z: as a product the last axis is outermost
+        let quat: [number, number, number, number] = [0, 0, 0, 1]
+        for (const axis of rotation[1]) {
+            const index = "XYZ".indexOf(axis) as 0 | 1 | 2
+            quat = multiply(about(index, value[index]), quat)
+        }
+        return { ...IDENTITY, quat }
+    }
+    if (kind === "transform" && value.length >= 16) {
+        // USD writes a matrix4d row by row, and the translation is its last row; each row's length is that axis' scale.
+        const scale = [0, 1, 2].map((row) => Math.hypot(value[row * 4], value[row * 4 + 1], value[row * 4 + 2]) || 1)
+        const unit = value.map((entry, index) =>
+            index < 12 && index % 4 < 3 ? entry / scale[Math.floor(index / 4)] : entry
+        )
+        return {
+            xyz: [value[12], value[13], value[14]],
+            quat: quatFromRows(unit),
+            scale: scale as [number, number, number],
+        }
+    }
+    return IDENTITY
+}
+
+/** `parent` then `child`: the child's offset turned and scaled by the parent's, its scale times the parent's. */
+function composePlacement(parent: Placement, child: Placement): Placement {
+    const scaled: [number, number, number] = [
+        child.xyz[0] * parent.scale[0],
+        child.xyz[1] * parent.scale[1],
+        child.xyz[2] * parent.scale[2],
+    ]
+    const turned = rotate(parent.quat, scaled)
     return {
-        xyz: translate.length >= 3 ? [translate[0], translate[1], translate[2]] : [0, 0, 0],
-        // USD writes a quatf as (w, x, y, z); three wants (x, y, z, w).
-        quat: orient.length >= 4 ? [orient[1], orient[2], orient[3], orient[0]] : [0, 0, 0, 1],
+        xyz: [parent.xyz[0] + turned[0], parent.xyz[1] + turned[1], parent.xyz[2] + turned[2]],
+        quat: multiply(parent.quat, child.quat),
+        scale: [parent.scale[0] * child.scale[0], parent.scale[1] * child.scale[1], parent.scale[2] * child.scale[2]],
     }
 }
 
@@ -505,65 +643,121 @@ function quatFromRows(m: number[]): [number, number, number, number] {
     return [(r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, s / 4, (r[1][0] - r[0][1]) / s]
 }
 
-/**
- * Every Material prim in the layer being parsed, by its path, so a geom can find what it binds.
- *
- * Module-level because a geom names its material by absolute path and may sit anywhere in the
- * tree, so the lookup cannot be threaded down from the walk without passing a map through every
- * geometry helper. parseUsda refills it before each parse.
- */
-const materials = new Map<string, [number, number, number, number]>()
-const materialTextures = new Map<string, string>()
+/** What a bound material says a surface looks like: UsdPreviewSurface's inputs, resolved through connections. */
+interface Surface {
+    color?: [number, number, number]
+    /** the image its diffuseColor reads, when it reads one */
+    texture?: string
+    opacity?: number
+    roughness?: number
+    metallic?: number
+    ior?: number
+}
+
+/** Every Material's surface by path, refilled per parse: a geom binds by absolute path from anywhere in the tree. */
+const surfaces = new Map<string, Surface>()
+
+/** Index a layer's materials for surfaceLook: the main description does it itself, a mesh layer's reader calls this. */
+export function describeMaterials(roots: Prim[]): void {
+    indexMaterials(roots)
+}
 
 function indexMaterials(roots: Prim[]): void {
-    materials.clear()
-    materialTextures.clear()
+    surfaces.clear()
+    const byPath = new Map<string, Prim>()
+    walk(roots, (prim) => byPath.set(pathOf(prim), prim))
     walk(roots, (prim) => {
-        if (prim.type !== "Material") return
-        const color = numbers(prim.attrs["inputs:color"])
-        if (color.length >= 3) materials.set(pathOf(prim), [color[0], color[1], color[2], 1])
-        // A material states its image the UsdPreviewSurface way: a UsdUVTexture shader under it
-        // whose inputs:file names the picture, with the surface's diffuseColor connected to it.
-        // The shader is a child prim, so the file is found by looking inside the material rather
-        // than on it.
-        const file = textureUnder(prim)
-        if (file) materialTextures.set(pathOf(prim), file)
+        if (prim.type === "Material") surfaces.set(pathOf(prim), surfaceOf(prim, byPath))
     })
 }
 
-/** The image a material's UsdUVTexture names, if it has one. */
-function textureUnder(material: Prim): string | null {
-    let found: string | null = null
+/** A material's surface: the shader its outputs:surface connects to (or the UsdPreviewSurface under it), read. */
+function surfaceOf(material: Prim, byPath: Map<string, Prim>): Surface {
+    const target = connectionOf(material.attrs["outputs:surface.connect"])
+    let shader = target ? byPath.get(target.prim) : undefined
     walk([material], (prim) => {
-        if (found || prim.type !== "Shader") return
-        if (unquote(prim.attrs["info:id"] ?? "") !== "UsdUVTexture") return
-        const file = (prim.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)
-        if (file) found = file[1]
+        if (!shader && prim.type === "Shader" && unquote(prim.attrs["info:id"] ?? "") === "UsdPreviewSurface") {
+            shader = prim
+        }
     })
-    return found
+    if (!shader) {
+        // a material with no shader states its colour on itself, as dimos's older layers do
+        const own = numbers(material.attrs["inputs:color"])
+        return own.length >= 3 ? { color: [own[0], own[1], own[2]] } : {}
+    }
+    const out: Surface = {}
+    const diffuse = inputOf(shader, "inputs:diffuseColor", byPath)
+    if (diffuse?.texture) {
+        out.texture = diffuse.texture
+        // the texture's scale multiplies what it reads, which is what three's colour does to a map
+        const scale = diffuse.scale ?? []
+        out.color = scale.length >= 3 ? [scale[0], scale[1], scale[2]] : [1, 1, 1]
+    } else if (diffuse?.value && diffuse.value.length >= 3) {
+        out.color = [diffuse.value[0], diffuse.value[1], diffuse.value[2]]
+    }
+    for (
+        const [key, name] of [["opacity", "inputs:opacity"], ["roughness", "inputs:roughness"], [
+            "metallic",
+            "inputs:metallic",
+        ], ["ior", "inputs:ior"]] as const
+    ) {
+        const value = inputOf(shader, name, byPath)?.value?.[0]
+        if (value !== undefined && Number.isFinite(value)) out[key] = value
+    }
+    return out
 }
 
-/**
- * The colour a geometry prim should be drawn in.
- *
- * `primvars:displayColor` first, which is what a geom with no material carries. Then the bound
- * material's own `inputs:color`: the converter writes a real UsdShade Material per MJCF
- * material and binds it, so a G1's ten black parts and its silver ones are stated there and
- * nowhere else. Reading only displayColor drew the whole robot in the default grey, and the
- * only displayColors in a converted layer are the green collision shapes and red sites.
- */
-function colorOf(prim: Prim): Partial<DescriptionGeometry> {
-    const bound = (prim.attrs["material:binding"] ?? "").match(/<([^>]+)>/)
-    // The image, where the bound material names one. It is kept even when displayColor decides the
-    // colour: a slab states a flat grey *and* binds the concrete it is actually made of, and three
-    // multiplies the two, so the colour stays as the tint over the picture.
-    const texture = bound ? materialTextures.get(bound[1]) : undefined
-    const shown = numbers(prim.attrs["primvars:displayColor"])
-    if (shown.length >= 3) {
-        return { color: [shown[0], shown[1], shown[2], 1], ...(texture ? { texture } : {}) }
+/** `</a/b.inputs:color>` as the prim and the attribute it names. */
+function connectionOf(value: string | undefined): { prim: string; attribute: string } | null {
+    const path = (value ?? "").match(/<([^>]+)>/)?.[1]
+    if (!path) return null
+    const dot = path.lastIndexOf(".")
+    return dot === -1 ? { prim: path, attribute: "" } : { prim: path.slice(0, dot), attribute: path.slice(dot + 1) }
+}
+
+/** A shader input's value, following its connection to a material's interface or a UsdUVTexture's file. */
+function inputOf(
+    prim: Prim,
+    name: string,
+    byPath: Map<string, Prim>,
+    depth = 0,
+): { value?: number[]; texture?: string; scale?: number[] } | null {
+    const connection = connectionOf(prim.attrs[`${name}.connect`])
+    if (connection && depth < 8) {
+        const source = byPath.get(connection.prim)
+        if (!source) return null
+        if (unquote(source.attrs["info:id"] ?? "") === "UsdUVTexture" && connection.attribute.startsWith("outputs:")) {
+            const file = (source.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)?.[1]
+            return file ? { texture: file, scale: numbers(source.attrs["inputs:scale"]) } : null
+        }
+        return inputOf(source, connection.attribute, byPath, depth + 1)
     }
-    const color = bound ? materials.get(bound[1]) : undefined
-    return { ...(color ? { color } : {}), ...(texture ? { texture } : {}) }
+    const value = prim.attrs[name]
+    return value === undefined ? null : { value: numbers(value) }
+}
+
+/** The material bound to a prim or, failing that, to the nearest ancestor that binds one. */
+function boundSurface(prim: Prim): Surface | undefined {
+    for (let at: Prim | undefined = prim; at; at = at.parent) {
+        const bound = (at.attrs["material:binding"] ?? "").match(/<([^>]+)>/)
+        if (bound) return surfaces.get(bound[1])
+    }
+    return undefined
+}
+
+/** How a geometry draws: its bound material wins over displayColor, as USD has it (displayColor is the no-material fallback). */
+export function surfaceLook(prim: Prim): Partial<DescriptionGeometry> {
+    const surface = boundSurface(prim)
+    const shown = numbers(prim.attrs["primvars:displayColor"])
+    const opacity = surface?.opacity ?? numbers(prim.attrs["primvars:displayOpacity"])[0] ?? 1
+    const color = surface?.color ?? (shown.length >= 3 ? [shown[0], shown[1], shown[2]] : undefined)
+    return {
+        ...(color ? { color: [color[0], color[1], color[2], opacity] as [number, number, number, number] } : {}),
+        ...(surface?.texture ? { texture: surface.texture } : {}),
+        ...(surface?.roughness !== undefined ? { roughness: surface.roughness } : {}),
+        ...(surface?.metallic !== undefined ? { metallic: surface.metallic } : {}),
+        ...(surface?.ior !== undefined ? { ior: surface.ior } : {}),
+    }
 }
 
 /**
@@ -587,51 +781,84 @@ function referenceOf(prim: Prim): string | null {
     return match ? match[1] : null
 }
 
-/** The geometry prims inside a link, as the visuals or the collisions. */
-function geometriesOf(prim: Prim, collision: boolean): DescriptionGeometry[] {
-    const out: DescriptionGeometry[] = []
-    for (const child of prim.children) {
-        if (isLink(child) || child.type in JOINT_TYPES || child.type === "Scope") continue
-        // Collision geometry is marked by PhysicsCollisionAPI; everything else is a visual.
-        const isCollision = (child.meta["apiSchemas"] ?? "").includes("PhysicsCollisionAPI")
-        if (isCollision !== collision) continue
-        const geometry = geometryOf(child)
-        if (geometry) out.push(geometry)
+const SHAPES = new Set(["Mesh", "Cube", "Sphere", "Cylinder", "Plane"])
+
+/** A prim that draws something: a gprim, or anything standing for a file of geometry (a reference arc, assetInfo). */
+function isGeometry(prim: Prim): boolean {
+    return SHAPES.has(prim.type) || meshPathOf(prim) !== null
+}
+
+/** Whether USD draws this prim: not invisible, and of a purpose a renderer shows (guides and proxies are not). */
+export function rendered(prim: Prim): boolean {
+    for (let at: Prim | undefined = prim; at; at = at.parent) {
+        if (unquote(at.attrs["visibility"] ?? "") === "invisible") return false
+        const purpose = unquote(at.attrs["purpose"] ?? "")
+        if (purpose === "guide" || purpose === "proxy") return false
+        if (purpose === "render" || purpose === "default") return true
     }
+    return true
+}
+
+/** Every geometry prim and the link (or scene root) it moves with, however deep under that link it sits. */
+function geometryPrims(roots: Prim[], sceneRoot: Prim | null): { prim: Prim; owner: Prim }[] {
+    const out: { prim: Prim; owner: Prim }[] = []
+    const visit = (prim: Prim, owner: Prim | null): void => {
+        const here = isLink(prim) || prim === sceneRoot ? prim : owner
+        if (prim !== here && isGeometry(prim)) {
+            if (here) out.push({ prim, owner: here })
+            return
+        }
+        if (prim.type in JOINT_TYPES || prim.type === "Material" || prim.type in LIGHT_TYPES) return
+        for (const child of prim.children) visit(child, here)
+    }
+    for (const root of roots) visit(root, null)
     return out
 }
 
-function geometryOf(prim: Prim): DescriptionGeometry | null {
-    const origin = placementOf(prim)
-    const scale = numbers(prim.attrs["xformOp:scale"])
-    const tint = colorOf(prim)
+/** The prim's placement relative to `owner`: every transform between them, composed. */
+function placementUnder(prim: Prim, owner: Prim): Placement {
+    const chain: Prim[] = []
+    for (let at: Prim | undefined = prim; at && at !== owner; at = at.parent) chain.unshift(at)
+    return chain.reduce((placed, at) => composePlacement(placed, xformOf(at)), IDENTITY)
+}
+
+function geometryOf(prim: Prim, owner: Prim): DescriptionGeometry | null {
+    const { xyz, quat, scale } = placementUnder(prim, owner)
+    const origin: Origin = { xyz, quat }
+    const tint = surfaceLook(prim)
     const mesh = meshPathOf(prim)
+    const uneven = scale.some((value) => Math.abs(value - 1) > 1e-9)
     if (prim.type === "Mesh" || mesh) {
         if (!mesh) return null
-        return {
-            type: "mesh",
-            origin,
-            mesh,
-            ...(scale.length >= 3 ? { scale: [scale[0], scale[1], scale[2]] as [number, number, number] } : {}),
-            ...tint,
-        }
+        return { type: "mesh", origin, mesh, ...(uneven ? { scale } : {}), ...tint }
     }
+    // a size left unsaid is UsdGeom's schema default (pxr usdGeom/schema.usda: Cube size 2, radius 1, height 2, Plane 2 x 2)
     if (prim.type === "Cube") {
         // A Cube is a unit cube scaled to the box's extents: USD has no three-sided box.
-        const size = numbers(prim.attrs["size"])[0] ?? 1
-        const extents: [number, number, number] = scale.length >= 3
-            ? [scale[0] * size, scale[1] * size, scale[2] * size]
-            : [size, size, size]
-        return { type: "box", origin, size: extents, ...tint }
+        const size = numbers(prim.attrs["size"])[0] ?? 2
+        return { type: "box", origin, size: [scale[0] * size, scale[1] * size, scale[2] * size], ...tint }
     }
     if (prim.type === "Sphere") {
         const radius = numbers(prim.attrs["radius"])[0] ?? 1
-        return { type: "sphere", origin, radius: radius * (scale[0] ?? 1), ...tint }
+        return { type: "sphere", origin, radius: radius * scale[0], ...tint }
     }
     if (prim.type === "Cylinder") {
         const radius = numbers(prim.attrs["radius"])[0] ?? 1
-        const height = numbers(prim.attrs["height"])[0] ?? 1
-        return { type: "cylinder", origin, radius: radius * (scale[0] ?? 1), length: height * (scale[2] ?? 1), ...tint }
+        const height = numbers(prim.attrs["height"])[0] ?? 2
+        return { type: "cylinder", origin, radius: radius * scale[0], length: height * scale[2], ...tint }
+    }
+    if (prim.type === "Plane") {
+        // A Plane lies across its axis (Z unless it says otherwise): turned so its face is the shape's xy.
+        const axis = unquote(prim.attrs["axis"] ?? "Z")
+        const half = Math.SQRT1_2
+        const turn: [number, number, number, number] = axis === "X"
+            ? [0, half, 0, half]
+            : axis === "Y"
+            ? [-half, 0, 0, half]
+            : [0, 0, 0, 1]
+        const width = (numbers(prim.attrs["width"])[0] ?? 2) * scale[0]
+        const length = (numbers(prim.attrs["length"])[0] ?? 2) * scale[1]
+        return { type: "plane", origin: { xyz, quat: multiply(quat, turn) }, size: [width, length, 0], ...tint }
     }
     return null
 }
@@ -742,12 +969,13 @@ function rootFrame(roots: Prim[], defaultPrim: string | null): Prim | null {
     const root = roots.find((prim) => prim.name === defaultPrim) ?? (roots.length === 1 ? roots[0] : null)
     if (!root || isLink(root)) return null
     let orphans = 0
+    let loose = false
     walk(root.children, (prim) => {
         if (isLink(prim) && !linkAncestor(prim, null)) orphans += 1
+        if (isGeometry(prim) && !linkAncestor(prim, null)) loose = true
     })
-    // One is a base link, which is meant to have no parent and is placed from tf. Several means
-    // nobody is holding them: that is a room, and the root is the frame they all stand in.
-    return orphans > 1 ? root : null
+    // several unparented bodies, or shapes in no body at all, make a room: the root is the frame they stand in
+    return orphans > 1 || loose ? root : null
 }
 
 function pathOf(prim: Prim): string {
@@ -937,8 +1165,8 @@ function lookOf(roots: Prim[]): DescriptionLook | undefined {
 const LIGHT_TYPES: Record<string, DescriptionLight["type"]> = {
     DistantLight: "distant",
     SphereLight: "point",
-    DiskLight: "point",
-    RectLight: "point",
+    DiskLight: "disk",
+    RectLight: "rect",
     DomeLight: "dome",
 }
 
@@ -968,25 +1196,48 @@ function lightsOf(roots: Prim[]): DescriptionLight[] {
     return found
 }
 
+/** UsdLux's schema defaults for what a light leaves unsaid (pxr usdLux/schema.usda) */
+export const LIGHT_DEFAULTS: Record<string, number> = {
+    "inputs:intensity": 1,
+    "inputs:exposure": 0,
+    "inputs:angle": 0.53,
+    "inputs:width": 1,
+    "inputs:height": 1,
+    "inputs:radius": 0.5,
+}
+
 function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): DescriptionLight | null {
-    const intensity = Number(prim.attrs["inputs:intensity"] ?? prim.attrs["intensity"] ?? 1)
+    // the inputs: spelling, else the pre-21.05 one without it
+    const raw = (name: string) => prim.attrs[name] ?? prim.attrs[name.replace(/^inputs:/, "")]
+    const value = (name: string): number => {
+        const parsed = Number(unquote(raw(name) ?? ""))
+        return raw(name) !== undefined && Number.isFinite(parsed) ? parsed : LIGHT_DEFAULTS[name]
+    }
+    const flag = (name: string, fallback: boolean): boolean => {
+        const text = raw(name)
+        return text === undefined ? fallback : unquote(text) !== "0" && unquote(text) !== "false"
+    }
+    const intensity = value("inputs:intensity")
     if (!(intensity > 0)) return null
-    const colour = numbers(prim.attrs["inputs:color"] ?? prim.attrs["color"])
+    const colour = numbers(raw("inputs:color"))
     // A light shines down its own -Z; where that points once the transforms above it are applied is its direction.
     const direction = rotate(world.quat, [0, 0, -1])
-    const shadow = unquote(prim.attrs["inputs:shadow:enable"] ?? prim.attrs["shadow:enable"] ?? "1")
-    // USD's area lights state their own size, and a lamp with a size throws a soft edge rather than a
-    // hard one. The exporter writes it on every fitting, so the softness does not have to be guessed.
-    const size = Number(unquote(prim.attrs["inputs:radius"] ?? prim.attrs["radius"] ?? ""))
+    const texture = (raw("inputs:texture:file") ?? "").match(/@([^@]+)@/)?.[1]
     return {
         name: frameName(prim),
         type,
         xyz: world.xyz,
+        quat: world.quat,
         direction,
         color: colour.length >= 3 ? [colour[0], colour[1], colour[2]] : [1, 1, 1],
         intensity,
-        shadow: shadow !== "0" && shadow !== "false",
-        radius: Number.isFinite(size) && size > 0 ? size : undefined,
+        exposure: value("inputs:exposure"),
+        normalize: flag("inputs:normalize", false),
+        shadow: flag("inputs:shadow:enable", true),
+        ...(type === "distant" ? { angle: value("inputs:angle") } : {}),
+        ...(type === "rect" ? { width: value("inputs:width"), height: value("inputs:height") } : {}),
+        ...(type === "disk" || type === "point" ? { radius: value("inputs:radius") } : {}),
+        ...(texture ? { texture } : {}),
     }
 }
 

@@ -278,10 +278,10 @@ test("a geom takes the colour of the material it binds", () => {
     assertEquals(visual.color![3], 1)
 })
 
-test("displayColor still wins over the bound material", () => {
-    // A geom that states its own colour means it; the binding is the fallback.
+test("a bound material wins over displayColor, as USD has it", () => {
+    // displayColor is what a renderer shows for a prim with no material; Blender draws the material.
     const visuals = parseUsda(_MATERIALS).links[0].visuals
-    assertEquals(visuals[1].color, [1, 0, 0, 1])
+    assertAlmostEquals(visuals[1].color![0], 0.0331, 1e-6)
 })
 
 // A room written the way MuJoCo's converter writes one: a plain Xform at the root, a body per thing standing in
@@ -543,4 +543,141 @@ def Camera "view"
 }
 `).look
     assertEquals(silent, undefined, "a camera that says nothing about exposure is not a look")
+})
+
+// ---- scenes that are not robots: loose shapes, planes, guides, variants, crates -------------------------------
+
+// MuJoCo's converter writes a logistics room as plain Cubes and a Plane under a Scope, with no body anywhere.
+const _LOOSE = `#usda 1.0
+(
+    defaultPrim = "room"
+)
+
+def Xform "room"
+{
+    def Scope "Geometry"
+    {
+        def Plane "floor" (
+            apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double width = 20
+            double length = 10
+        }
+
+        def Cube "wall" (
+            apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double size = 2
+            float3 xformOp:scale = (6, 0.1, 1.5)
+            double3 xformOp:translate = (0, 5, 1.5)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+
+        def Cube "collider" (
+            apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            uniform token purpose = "guide"
+        }
+    }
+}
+`
+
+test("a room with no bodies still draws its shapes, on its root's frame", () => {
+    const { links } = parseUsda(_LOOSE)
+    assertEquals(links.map((link) => link.name), ["room"])
+    const kinds = links[0].visuals.map((visual) => visual.type)
+    assertEquals(kinds, ["plane", "box"], "the guide is a collider USD does not draw")
+    const wall = links[0].visuals[1]
+    assertEquals(wall.size, [12, 0.2, 3])
+    assertEquals(wall.origin.xyz, [0, 5, 1.5])
+    assertEquals(links[0].visuals[0].size, [20, 10, 0])
+})
+
+const _VARIANTS = `#usda 1.0
+(
+    defaultPrim = "flat"
+)
+
+def Xform "flat"
+{
+    def Xform "fridge" (
+        variants = {
+            string state = "open"
+        }
+        prepend variantSets = "state"
+    )
+    {
+        float3 xformOp:rotateZYX = (0, 0, 90)
+        double3 xformOp:translate = (1, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZYX"]
+        variantSet "state" = {
+            "closed" {
+                def Xform "geometry" (
+                    prepend references = @meshes/closed.usdc@
+                )
+                {
+                }
+
+            }
+            "open" {
+                def Xform "geometry" (
+                    prepend references = @meshes/open.usdc@
+                )
+                {
+                }
+
+            }
+        }
+    }
+}
+`
+
+test("a variant set draws the variant selected, placed by every op its parents state", () => {
+    const [link] = parseUsda(_VARIANTS).links
+    assertEquals(link.visuals.map((visual) => visual.mesh), ["meshes/open.usdc"])
+    const { xyz, quat } = link.visuals[0].origin
+    assertEquals(xyz, [1, 2, 0])
+    // rotateZYX (0, 0, 90): a quarter turn about z
+    assertAlmostEquals(quat[2], Math.SQRT1_2, 1e-9)
+    assertAlmostEquals(quat[3], Math.SQRT1_2, 1e-9)
+})
+
+test("a crate's meshes come back placed, triangulated and in their material's colour", async () => {
+    const { meshGeometry } = await import("../src/three/urdf/parse.ts")
+    // written by pxr: one quad 1 m up, bound to a red UsdPreviewSurface
+    const geometry = meshGeometry(
+        "quad.usdc",
+        new Uint8Array(readFileSync(new URL("./fixtures/quad.usdc", import.meta.url))),
+    )
+    assertEquals(geometry.attributes.position.count, 6)
+    assertEquals(geometry.attributes.position.getZ(0), 1)
+    assertAlmostEquals(geometry.attributes.color.getX(0), 0.8, 1e-6)
+    assertAlmostEquals(geometry.attributes.color.getY(0), 0.1, 1e-6)
+})
+
+test("lights keep their exposure, normalize and size", () => {
+    const lights = parseUsda(`#usda 1.0
+def Xform "w"
+{
+    def RectLight "panel"
+    {
+        float inputs:intensity = 0.0007629
+        float inputs:exposure = 18
+        float inputs:width = 1.2
+        float inputs:height = 0.6
+    }
+    def DistantLight "sun"
+    {
+        bool inputs:normalize = 1
+        float inputs:intensity = 25.94
+    }
+}
+`).lights ?? []
+    const panel = lights.find((light) => light.name === "panel")!
+    assertEquals([panel.type, panel.exposure, panel.width, panel.height], ["rect", 18, 1.2, 0.6])
+    const sun = lights.find((light) => light.name === "sun")!
+    assertEquals([sun.normalize, sun.angle, sun.exposure], [true, 0.53, 0])
 })

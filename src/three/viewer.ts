@@ -12,42 +12,33 @@ import type { DescriptionLight, DescriptionLook } from "./urdf/description.ts"
 import { focusDistance, splatBackground } from "./point_material.ts"
 import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 
-// A layer states a light's brightness the way MuJoCo does: the magnitude of its colour, 0..1. Turning that into
-// three's units is this side's job, because only this side knows three's falloff model.
-//
-// A directional light has no falloff, so it scales straight: a 0.55 sun becomes a 1.65 key.
+/** the exposure the viewer's own lights are shown at, when no scene says how it wants to be shown */
 const DEFAULT_EXPOSURE = 1.1
-/** what a lamp contributes when it is one of the few throwing a shadow, and when it is not. Above 1
- *  and below 1 so the room keeps roughly the light it had while the shadows get their contrast. */
-/** Point a hemisphere light at this viewer's up axis. Three aims it with its position, defaulting to
- *  (0,1,0); in a Z-up world that lights the sides of things and leaves their tops in the dim mix. */
-function hemisphereUp(light: THREE.HemisphereLight): THREE.HemisphereLight {
-    light.position.set(0, 0, 1)
-    return light
-}
-
-const CASTER_SHARE = 1.7
-const FILL_SHARE = 0.4
-const DISTANT_GAIN = 3
-// A point light does: three's decay of 2 divides by the square of the distance, so an intensity that reads as 0.18
-// on a wall 3 m away has to leave the lamp at 0.18 * 3^2. Scaling by the gain alone is what made eighteen ceiling
-// fittings contribute nothing at all -- 0.72 at the bulb is 0.08 by the time it reaches the floor.
-const POINT_REFERENCE_METRES = 3
-const POINT_GAIN = 4
-// Ambient has no direction to fall off along; it is the fill that keeps shadows from going black.
-const AMBIENT_GAIN = 2
 /** how often the drawn meshes are measured again: they stream in, and the first frame's box is the robot alone */
 const SHADOW_REFIT_MS = 2000
 
 import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
 import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
-import { aimShadow, castsShadow, lampCastsShadow, MAX_SHADOW_LAMPS, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
+import { aimShadow, castsShadow, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
 import { SKY_ROTATION_X, skyTexture } from "./sky.ts"
+import { agxLut, AgxPass } from "./agx.ts"
+import { areaRadiance, areaSize, domeIrradiance, domeRadiance, pointIntensity, sunIrradiance } from "./light_units.ts"
+import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js"
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js"
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js"
 import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js"
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js"
+
+/** Hill's LTC Fresnel with the material's F90, not three's fixed 1, so an ior-1 surface does not mirror area lights. */
+function rectAreaFresnelWithF90(): void {
+    const chunk = THREE.ShaderChunk.lights_physical_pars_fragment
+    const fixed = "( material.specularColor * t2.x + ( vec3( material.specularF90 ) - material.specularColor ) * t2.y )"
+    THREE.ShaderChunk.lights_physical_pars_fragment = chunk.replace(
+        "( material.specularColor * t2.x + ( vec3( 1.0 ) - material.specularColor ) * t2.y )",
+        fixed,
+    )
+}
 
 export interface RenderStats {
     fps: number
@@ -139,13 +130,18 @@ export class Viewer {
     #occlusionRadius = 0.5
     #environment: THREE.Texture | null = null
     #environmentFrom: THREE.Texture | null = null
-    #shadowLamps: THREE.PointLight[] = []
+    #output: OutputPass | null = null
+    /** Blender's AgX, once its LUT is decoded; three's own AgX stands in until then */
+    #agx: AgxPass | null = null
+    #agxLoading = false
     /** every light casting a shadow right now: their boxes are re-aimed as the drawn scene grows */
     #shadowCasters: THREE.DirectionalLight[] = []
     /** the bounds the casters were last aimed at, to tell a scene that grew from one that only moved */
     #shadowBounds: THREE.Box3 | null = null
     #shadowFittedAt = 0
-    #sky: THREE.CanvasTexture | null = null
+    #sky: THREE.Texture | null = null
+    /** whether the sky is ours to dispose (a uniform one we made) or the caller's (a dome's picture) */
+    #ownSky = false
     controls: OrbitControls
     stats: Store<RenderStats> = new Store({
         fps: 0,
@@ -328,16 +324,6 @@ export class Viewer {
     }
 
     /**
-     * Light the scene the way a loaded description says to, instead of the viewer's own guess.
-     *
-     * A scene knows how it is lit and the viewer does not: office_555 names a sun and eighteen ceiling fittings,
-     * and lighting it with one fixed key and a fill renders it as flat pastel cutouts no matter how the room was
-     * built. Passing an empty list (or none) puts the defaults back, which is what a robot on its own wants.
-     *
-     * Intensities arrive in USD's photometric units, where a lamp is in the hundreds; three's lights are relative,
-     * so a point light is divided back down by the same factor the exporter multiplied up by.
-     */
-    /**
      * How the scene asks to be shown, or `null` for the viewer's own look.
      *
      * A room's colours were chosen against some tone curve, and showing them through a different one shows a room
@@ -364,7 +350,14 @@ export class Viewer {
             : curve === "none"
             ? THREE.NoToneMapping
             : THREE.ACESFilmicToneMapping
-        renderer.toneMappingExposure = look?.exposure ?? DEFAULT_EXPOSURE
+        // USD's camera exposure is 0 stops unless the stage says otherwise; the viewer's own guess is for its own lights
+        renderer.toneMappingExposure = look ? (look.exposure ?? 1) : DEFAULT_EXPOSURE
+        if (curve === "agx") {
+            this.#loadAgx()
+        }
+        if (this.#agx) {
+            this.#agx.exposure = renderer.toneMappingExposure
+        }
         // The nearest thing this renderer has to Blender's irradiance volumes. Blender's rooms read
         // right largely because light bounces; here nothing does, and a two-colour hemisphere is a poor
         // stand-in -- it lights a face by which way it points and nothing else. Pre-filtering the dome's
@@ -392,7 +385,7 @@ export class Viewer {
             this.scene.environmentRotation.set(SKY_ROTATION_X, 0, 0)
             this.scene.environmentIntensity = environment
             for (const light of this.#sceneLights) {
-                if (light instanceof THREE.HemisphereLight) {
+                if (light instanceof THREE.AmbientLight) {
                     light.intensity = 0
                 }
             }
@@ -409,55 +402,47 @@ export class Viewer {
         this.requestRender()
     }
 
-    setSceneLights(lights: readonly DescriptionLight[] | null | undefined): void {
+    /** Light the scene as a description says (light_units.ts, Blender's units); none puts the defaults back. Area lights cast no shadow. */
+    setSceneLights(
+        lights: readonly DescriptionLight[] | null | undefined,
+        textures?: ReadonlyMap<string, THREE.Texture>,
+    ): void {
         for (const light of this.#sceneLights) {
             light.removeFromParent()
             light.dispose()
         }
         this.#sceneLights = []
-        this.#shadowLamps = []
         this.#shadowCasters = this.#defaultLights.filter((light) => light.castShadow) as THREE.DirectionalLight[]
         const wanted = lights ?? []
         if (!wanted.some((light) => light.type === "dome")) {
             this.#clearSky()
         }
         for (const light of this.#defaultLights) light.visible = wanted.length === 0
-        // A lamp's shadow is a cube map -- six renders a frame -- so only a few get one. Without
-        // any, a room lit from its own ceiling has nothing standing on the floor: the sun through
-        // the windows is the only thing casting, and a desk under a fitting throws no shadow of
-        // its own.
-        //
-        // Which few is decided per frame by #aimShadowLamps, not here, because a room's fittings
-        // are all the same lamp: picking "the brightest" off eighteen identical ceiling lights is
-        // an all-ties sort that always lands on the same arbitrary corner, and every desk
-        // elsewhere stays shadowless.
-        const lamps = wanted.filter((light) =>
-            light.type !== "distant" && light.type !== "dome" && light.type !== "ambient"
-        )
+        if (wanted.some((light) => light.type === "rect" || light.type === "disk")) {
+            RectAreaLightUniformsLib.init()
+            rectAreaFresnelWithF90()
+        }
         for (const light of wanted) {
             const colour = new THREE.Color(light.color[0], light.color[1], light.color[2])
-            if (light.type === "dome") {
-                // A dome light is the sky: it lights everything, and it is what you see when you
-                // look past the room. Painting it as well as lighting by it is what stops an
-                // office with windows from having flat black outside them.
-                this.#setSky(colour, light.intensity)
+            let made: THREE.Light
+            if (light.type === "distant") {
+                made = new THREE.DirectionalLight(colour, sunIrradiance(light))
+            } else if (light.type === "dome" || light.type === "ambient") {
+                // What you see past the room is the dome itself, at its own radiance (or its picture).
+                const picture = light.texture ? textures?.get(light.texture) : undefined
+                this.#setSky(picture ?? skyTexture(colour.clone().multiplyScalar(domeRadiance(light))), !picture)
+                if (picture) {
+                    this.scene.backgroundIntensity = domeRadiance(light)
+                }
+                made = new THREE.AmbientLight(colour, domeIrradiance(light))
+            } else if (light.type === "rect" || light.type === "disk") {
+                const [width, height] = areaSize(light)
+                const area = new THREE.RectAreaLight(colour, areaRadiance(light), width, height)
+                area.quaternion.set(...(light.quat ?? [0, 0, 0, 1]))
+                made = area
+            } else {
+                made = new THREE.PointLight(colour, pointIntensity(light), 0, 2)
             }
-            const made = light.type === "distant"
-                ? new THREE.DirectionalLight(colour, light.intensity * DISTANT_GAIN)
-                : light.type === "ambient" || light.type === "dome"
-                ? hemisphereUp(
-                    new THREE.HemisphereLight(
-                        colour,
-                        colour.clone().multiplyScalar(0.4),
-                        light.intensity * AMBIENT_GAIN,
-                    ),
-                )
-                : new THREE.PointLight(
-                    colour,
-                    light.intensity * POINT_GAIN * POINT_REFERENCE_METRES * POINT_REFERENCE_METRES,
-                    0,
-                    2,
-                )
             if (made instanceof THREE.DirectionalLight) {
                 // A distant light has no position, only a direction: aimShadow stands it off from the scene.
                 made.position.set(...(light.direction.map((value) => -value * 50) as [number, number, number]))
@@ -468,10 +453,6 @@ export class Viewer {
                 }
             } else {
                 made.position.set(...light.xyz)
-                if (made instanceof THREE.PointLight && light.shadow && lamps.includes(light)) {
-                    made.userData.lampRadius = light.radius ?? 0
-                    this.#shadowLamps.push(made)
-                }
             }
             made.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(made)
@@ -479,59 +460,11 @@ export class Viewer {
         }
         this.#shadowBounds = null
         this.#fitShadows()
-        // These lights are new, so whatever the look said about the sky and the hemisphere has to be said
-        // again; otherwise a rebuild quietly lights the room twice.
+        // new lights: say the look again, or a rebuild lights the room twice
         if (this.#look) {
             this.setSceneLook(this.#look)
         }
         this.requestRender()
-    }
-
-    /**
-     * Give the cube maps to the lamps nearest the camera.
-     *
-     * A ceiling's fittings are all the same lamp, so there is no "brightest few" to choose: every
-     * ranking by intensity is a tie, and the same arbitrary three win every time while the rest of
-     * the room casts nothing. What matters is which lamps light the part of the room being looked
-     * at, and that changes as the camera moves, so it is decided per refit rather than once.
-     */
-    #aimShadowLamps(): void {
-        if (this.#shadowLamps.length === 0) {
-            return
-        }
-        const eye = this.camera.position
-        // Nearest is not enough in a building with more than one floor. Stand on the upper storey and
-        // the closest fittings are the ones in the ceiling below you: they are metres away through a
-        // slab, they light the floor underneath, and nothing they do reaches what you are looking at.
-        // Boosting those and dimming the lamps overhead left the upper floor black. A lamp has to be
-        // above the eye to be a candidate; if none is, fall back to range so a camera up among the
-        // roof beams still gets something.
-        const above = this.#shadowLamps.filter((lamp) => lamp.position.z > eye.z)
-        const byRange = (above.length > 0 ? above : [...this.#shadowLamps])
-            .sort((a, b) => a.position.distanceToSquared(eye) - b.position.distanceToSquared(eye))
-        const chosen = new Set(byRange.slice(0, MAX_SHADOW_LAMPS))
-        for (const lamp of this.#shadowLamps) {
-            // Every lamp stays lit -- switching the far ones off was tried and took a third of the light
-            // with it, leaving half the office dark. Instead the four that cast carry more of the room
-            // and the rest carry less. A lamp that does not occlude lights straight into every shadow the
-            // casters throw, so with eighteen fittings and four cube maps the shadow could only ever be
-            // about four eighteenths deep. Weighting the casters up and the others down buys that depth
-            // back without a fifth shadow map and without turning any part of the room off.
-            const wanted = chosen.has(lamp)
-            const base = (lamp.userData.baseIntensity ??= lamp.intensity)
-            lamp.intensity = base * (wanted ? CASTER_SHARE : FILL_SHARE)
-            if (wanted === lamp.castShadow) {
-                continue
-            }
-            if (wanted) {
-                // it only has to reach the floor and the furniture under it, not the room
-                lampCastsShadow(lamp, Math.max(4, lamp.position.z * 1.6), lamp.userData.lampRadius ?? 0)
-            } else {
-                lamp.castShadow = false
-                lamp.shadow.map?.dispose()
-                lamp.shadow.map = null
-            }
-        }
     }
 
     /**
@@ -581,16 +514,16 @@ export class Viewer {
         this.requestRender()
     }
 
-    /** The sky a scene's dome light stands for, behind everything and taking no depth. */
-    #setSky(colour: THREE.Color, intensity: number) {
-        const texture = skyTexture(colour, intensity)
-        if (!texture) {
-            return
+    /** The sky a scene's dome light stands for, behind everything and taking no depth. `own`: made here, so ours to dispose. */
+    #setSky(texture: THREE.Texture, own: boolean) {
+        if (this.#ownSky) {
+            this.#sky?.dispose()
         }
-        this.#sky?.dispose()
         this.#sky = texture
+        this.#ownSky = own
         this.scene.background = texture
-        // three samples the background on world Y; this viewer is Z-up, so the strip has to be turned
+        this.scene.backgroundIntensity = 1
+        // three samples the background on world Y; this viewer is Z-up, so the picture has to be turned
         this.scene.backgroundRotation.set(SKY_ROTATION_X, 0, 0)
     }
 
@@ -626,7 +559,9 @@ export class Viewer {
         this.#environment?.dispose()
         this.#environment = null
         this.#environmentFrom = null
-        this.#sky.dispose()
+        if (this.#ownSky) {
+            this.#sky.dispose()
+        }
         this.#sky = null
     }
 
@@ -717,15 +652,22 @@ export class Viewer {
         if (!renderer) {
             return
         }
-        const composer = this.#occlusion > 0 ? this.#composerFor(renderer) : null
+        const agx = this.#look?.toneMap === "agx" && this.#agx !== null
+        const composer = this.#occlusion > 0 || agx ? this.#composerFor(renderer) : null
         if (!composer) {
             this.#onTop.render(renderer, this.scene, this.camera)
             return
         }
-        // The beauty goes through the composer so ambient occlusion can darken the creases; the
-        // on-top overlay then draws straight to the canvas over it, which is what it is for. Tone
-        // mapping happens once: the composer's targets are linear, so three leaves the curve to
-        // OutputPass, and the overlay gets it from the renderer on its own way to the screen.
+        // the beauty goes through the composer (occlusion, then AgX or OutputPass), the on-top overlay straight to the canvas
+        if (this.#gtao) {
+            this.#gtao.enabled = this.#occlusion > 0
+        }
+        if (this.#agx) {
+            this.#agx.enabled = agx
+        }
+        if (this.#output) {
+            this.#output.enabled = !agx
+        }
         const mask = this.camera.layers.mask
         this.camera.layers.set(0)
         composer.render()
@@ -744,6 +686,23 @@ export class Viewer {
         }
     }
 
+    /** Decode Blender's AgX LUT once and put its pass in the composer; three's AgX draws until it is ready. */
+    #loadAgx() {
+        if (this.#agx || this.#agxLoading || !this.renderer) {
+            return
+        }
+        this.#agxLoading = true
+        agxLut().then((lut) => {
+            if (this.#disposed) {
+                return
+            }
+            this.#agx = new AgxPass(lut)
+            this.#agx.exposure = this.renderer?.toneMappingExposure ?? 1
+            this.#composer?.addPass(this.#agx)
+            this.requestRender()
+        }).catch((error) => console.warn("3D view: Blender's AgX could not be loaded, three's stands in", error))
+    }
+
     /**
      * The composer, built on first use and kept. Null if it could not be built -- a renderer that
      * cannot give us the targets is a reason to draw the scene plainly, not a reason to draw nothing.
@@ -755,7 +714,14 @@ export class Viewer {
         try {
             const width = Math.max(1, this.#host.clientWidth)
             const height = Math.max(1, this.#host.clientHeight)
-            const composer = new EffectComposer(renderer)
+            const ratio = renderer.getPixelRatio()
+            // linear and half float, so the tone curve at the end sees light above 1; multisampled like the canvas
+            const target = new THREE.WebGLRenderTarget(width * ratio, height * ratio, {
+                type: THREE.HalfFloatType,
+                // the canvas's own multisampling, so a frame through the composer is antialiased the same
+                samples: renderer.getContext().getParameter(renderer.getContext().SAMPLES) as number,
+            })
+            const composer = new EffectComposer(renderer, target)
             composer.addPass(new RenderPass(this.scene, this.camera))
             const gtao = new GTAOPass(this.scene, this.camera, width, height)
             // Nothing in this renderer bounces light, so a crease is lit exactly as brightly as the
@@ -769,14 +735,19 @@ export class Viewer {
                 scale: 1,
             })
             gtao.blendIntensity = this.#occlusion
+            gtao.enabled = this.#occlusion > 0
             composer.addPass(gtao)
-            composer.addPass(new OutputPass())
+            this.#output = new OutputPass()
+            composer.addPass(this.#output)
+            if (this.#agx) {
+                composer.addPass(this.#agx)
+            }
             composer.setSize(width, height)
             this.#gtao = gtao
             this.#composer = composer
             return composer
         } catch (error) {
-            console.warn("3D view: no ambient occlusion (composer unavailable)", error)
+            console.warn("3D view: no composer, the scene is drawn plainly", error)
             this.#occlusion = 0
             return null
         }
@@ -1121,7 +1092,6 @@ export class Viewer {
         if (now - this.#shadowFittedAt > SHADOW_REFIT_MS) {
             this.#shadowFittedAt = now
             this.#fitShadows()
-            this.#aimShadowLamps()
         }
         const dt = this.#lastFrame ? (now - this.#lastFrame) / 1000 : 0
         this.#lastFrame = now
