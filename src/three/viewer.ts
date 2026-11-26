@@ -8,7 +8,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
 import { CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js"
 import type { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js"
 import { Store } from "./store.ts"
-import type { DescriptionLight, DescriptionLook } from "./urdf/description.ts"
+import type { DescriptionCamera, DescriptionLight, DescriptionLook } from "./urdf/description.ts"
 import { focusDistance, splatBackground } from "./point_material.ts"
 import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 
@@ -16,6 +16,11 @@ import { CATCH_UP_SECONDS, PanGate, SmoothFollow } from "./follow.ts"
 const DEFAULT_EXPOSURE = 1.1
 /** how often the drawn meshes are measured again: they stream in, and the first frame's box is the robot alone */
 const SHADOW_REFIT_MS = 2000
+/** the fewest fragment texture units WebGL 2 promises (MAX_TEXTURE_IMAGE_UNITS) */
+const WEBGL2_MIN_TEXTURE_UNITS = 16
+/** the maps a scene material can bind (robotDescription's) plus the environment: each takes a texture unit, as each shadow does */
+const MATERIAL_TEXTURE_UNITS =
+    ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap", "envMap"].length
 
 import { themeColors } from "../theme/theme.ts"
 import { cssColor } from "./robot_model.ts"
@@ -23,7 +28,17 @@ import { FRAME_BUDGET_MS, splatFallback } from "./rendering.ts"
 import { aimShadow, castsShadow, SHADOW_MIN_EXTENT_METRES } from "./shadows.ts"
 import { SKY_ROTATION_X, skyTexture } from "./sky.ts"
 import { agxLut, AgxPass } from "./agx.ts"
-import { areaRadiance, areaSize, domeIrradiance, domeRadiance, pointIntensity, sunIrradiance } from "./light_units.ts"
+import {
+    areaIntensity,
+    areaRadiance,
+    areaSize,
+    cylinderIntensity,
+    domeIrradiance,
+    domeRadiance,
+    lightColor,
+    pointIntensity,
+    sunIrradiance,
+} from "./light_units.ts"
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js"
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js"
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js"
@@ -136,6 +151,12 @@ export class Viewer {
     #agxLoading = false
     /** every light casting a shadow right now: their boxes are re-aimed as the drawn scene grows */
     #shadowCasters: THREE.DirectionalLight[] = []
+    /** the scene's point and spot lights that shadow: their depth range follows the drawn scene too */
+    #localCasters: { light: THREE.PointLight | THREE.SpotLight; radius: number }[] = []
+    /** the dome a scene's lights name: its turn and how bright its picture is, for the environment it lights by */
+    #dome: { rotation: THREE.Euler; intensity: number } | null = null
+    /** the camera's own lens, kept while the view looks through a scene's camera */
+    #ownLens: { fov: number; near: number; far: number } | null = null
     /** the bounds the casters were last aimed at, to tell a scene that grew from one that only moved */
     #shadowBounds: THREE.Box3 | null = null
     #shadowFittedAt = 0
@@ -379,16 +400,11 @@ export class Viewer {
                 this.#gtao.blendIntensity = occlusion
             }
         }
-        const environment = look?.environmentIntensity
-        if (environment !== undefined && this.#sky) {
+        // a dome lights by its own sky, prefiltered (diffuse and reflections); environmentIntensity scales it, as Blender's World strength
+        if (this.#sky && this.#dome) {
             this.scene.environment = this.#environmentOf(this.#sky)
-            this.scene.environmentRotation.set(SKY_ROTATION_X, 0, 0)
-            this.scene.environmentIntensity = environment
-            for (const light of this.#sceneLights) {
-                if (light instanceof THREE.AmbientLight) {
-                    light.intensity = 0
-                }
-            }
+            this.scene.environmentRotation.copy(this.#dome.rotation)
+            this.scene.environmentIntensity = this.#dome.intensity * (look?.environmentIntensity ?? 1)
         } else {
             this.scene.environment = null
             this.scene.environmentIntensity = 1
@@ -402,58 +418,115 @@ export class Viewer {
         this.requestRender()
     }
 
-    /** Light the scene as a description says (light_units.ts, Blender's units); none puts the defaults back. Area lights cast no shadow. */
+    /** Light the scene as a description says (light_units.ts): a dome is the sky and environment, a shadowed or cone-shaped rect/disk a spot (three's area lights can do neither). */
     setSceneLights(
         lights: readonly DescriptionLight[] | null | undefined,
         textures?: ReadonlyMap<string, THREE.Texture>,
     ): void {
         for (const light of this.#sceneLights) {
             light.removeFromParent()
+            if (light instanceof THREE.SpotLight || light instanceof THREE.DirectionalLight) {
+                light.target.removeFromParent()
+            }
             light.dispose()
         }
         this.#sceneLights = []
+        this.#localCasters = []
         this.#shadowCasters = this.#defaultLights.filter((light) => light.castShadow) as THREE.DirectionalLight[]
         const wanted = lights ?? []
-        if (!wanted.some((light) => light.type === "dome")) {
+        const dome = wanted.find((light) => light.type === "dome")
+        if (!dome) {
             this.#clearSky()
+            this.#dome = null
         }
         for (const light of this.#defaultLights) light.visible = wanted.length === 0
-        if (wanted.some((light) => light.type === "rect" || light.type === "disk")) {
+        if (wanted.some((light) => (light.type === "rect" || light.type === "disk") && !light.shadow && !light.cone)) {
             RectAreaLightUniformsLib.init()
             rectAreaFresnelWithF90()
         }
+        const shadowed = this.#shadowedLights(wanted)
         for (const light of wanted) {
-            const colour = new THREE.Color(light.color[0], light.color[1], light.color[2])
-            let made: THREE.Light
+            const colour = new THREE.Color(...lightColor(light))
+            const shadow = shadowed.has(light)
+            let made: THREE.Light | null = null
             if (light.type === "distant") {
                 made = new THREE.DirectionalLight(colour, sunIrradiance(light))
-            } else if (light.type === "dome" || light.type === "ambient") {
-                // What you see past the room is the dome itself, at its own radiance (or its picture).
+            } else if (light.type === "dome") {
+                if (light !== dome) continue
+                // the dome's own radiance (or picture) behind the room, its equirectangular top overhead in this Z-up world, then turned as its prim is
                 const picture = light.texture ? textures?.get(light.texture) : undefined
-                this.#setSky(picture ?? skyTexture(colour.clone().multiplyScalar(domeRadiance(light))), !picture)
+                const rotation = new THREE.Euler().setFromRotationMatrix(
+                    new THREE.Matrix4().makeRotationFromQuaternion(
+                        new THREE.Quaternion(...(light.quat ?? [0, 0, 0, 1])),
+                    )
+                        .multiply(new THREE.Matrix4().makeRotationX(SKY_ROTATION_X)),
+                )
+                this.#setSky(
+                    picture ?? skyTexture(colour.clone().multiplyScalar(domeRadiance(light))),
+                    !picture,
+                    rotation,
+                )
                 if (picture) {
                     this.scene.backgroundIntensity = domeRadiance(light)
                 }
+                this.#dome = { rotation, intensity: picture ? domeRadiance(light) : 1 }
+                continue
+            } else if (light.type === "ambient") {
                 made = new THREE.AmbientLight(colour, domeIrradiance(light))
-            } else if (light.type === "rect" || light.type === "disk") {
+            } else if ((light.type === "rect" || light.type === "disk") && !light.shadow && !light.cone) {
                 const [width, height] = areaSize(light)
                 const area = new THREE.RectAreaLight(colour, areaRadiance(light), width, height)
                 area.quaternion.set(...(light.quat ?? [0, 0, 0, 1]))
                 made = area
             } else {
-                made = new THREE.PointLight(colour, pointIntensity(light), 0, 2)
+                const intensity = light.type === "rect" || light.type === "disk"
+                    ? areaIntensity(light)
+                    : light.type === "cylinder"
+                    ? cylinderIntensity(light)
+                    : pointIntensity(light)
+                const faces = light.type === "rect" || light.type === "disk"
+                if (light.cone || faces) {
+                    // a face lights the hemisphere in front of it; a cone narrows that (three's widest is a hemisphere)
+                    const angle = light.cone ? Math.min(Math.PI / 2, (light.cone.angle * Math.PI) / 180) : Math.PI / 2
+                    const spot = new THREE.SpotLight(
+                        colour,
+                        intensity,
+                        0,
+                        angle,
+                        light.cone ? light.cone.softness : 1,
+                        2,
+                    )
+                    spot.target.position.set(
+                        ...(light.xyz.map((value, index) => value + light.direction[index]) as [
+                            number,
+                            number,
+                            number,
+                        ]),
+                    )
+                    this.scene.add(spot.target)
+                    made = spot
+                } else {
+                    made = new THREE.PointLight(colour, intensity, 0, 2)
+                }
             }
             if (made instanceof THREE.DirectionalLight) {
                 // A distant light has no position, only a direction: aimShadow stands it off from the scene.
                 made.position.set(...(light.direction.map((value) => -value * 50) as [number, number, number]))
-                if (light.shadow) {
+                if (shadow) {
                     castsShadow(made, new THREE.Vector3(...light.direction))
                     this.scene.add(made.target)
                     this.#shadowCasters.push(made)
                 }
-            } else {
+            } else if (made) {
                 made.position.set(...light.xyz)
+                if (shadow && (made instanceof THREE.PointLight || made instanceof THREE.SpotLight)) {
+                    made.castShadow = true
+                    made.shadow.mapSize.setScalar(this.#localShadowTexels(made))
+                    made.shadow.bias = -0.0005
+                    this.#localCasters.push({ light: made, radius: light.radius ?? 0 })
+                }
             }
+            if (!made) continue
             made.layers.enable(ON_TOP_CHANNEL)
             this.scene.add(made)
             this.#sceneLights.push(made)
@@ -461,10 +534,64 @@ export class Viewer {
         this.#shadowBounds = null
         this.#fitShadows()
         // new lights: say the look again, or a rebuild lights the room twice
-        if (this.#look) {
-            this.setSceneLook(this.#look)
-        }
+        this.setSceneLook(this.#look)
         this.requestRender()
+    }
+
+    /** a spot's shadow map costs the sun's; a point light's six faces share that total */
+    #localShadowTexels(light: THREE.PointLight | THREE.SpotLight): number {
+        const sun = this.#defaultLights.find((each) => each.castShadow) as THREE.DirectionalLight
+        return light instanceof THREE.PointLight
+            ? Math.round(sun.shadow.mapSize.x / Math.sqrt(8))
+            : sun.shadow.mapSize.x
+    }
+
+    /** the lights that shadow: all that ask, while texture units last, brightest first */
+    #shadowedLights(lights: readonly DescriptionLight[]): Set<DescriptionLight> {
+        const units = this.renderer?.capabilities.maxTextures ?? WEBGL2_MIN_TEXTURE_UNITS
+        const budget = Math.max(
+            0,
+            units - MATERIAL_TEXTURE_UNITS - this.#shadowCasters.filter((light) => light.visible).length,
+        )
+        const asking = lights.filter((light) => light.shadow && light.type !== "dome" && light.type !== "ambient")
+        const strength = (light: DescriptionLight) =>
+            light.type === "distant"
+                ? Infinity
+                : light.type === "rect" || light.type === "disk"
+                ? areaIntensity(light)
+                : light.type === "cylinder"
+                ? cylinderIntensity(light)
+                : pointIntensity(light)
+        const chosen = [...asking].sort((a, b) => strength(b) - strength(a)).slice(0, budget)
+        if (chosen.length < asking.length) {
+            console.info(
+                `3D view: ${asking.length} lights ask to shadow, this GPU has texture units for ${budget}: the brightest do`,
+            )
+        }
+        return new Set(chosen)
+    }
+
+    /** Look through one of the scene's cameras: its pose and its lens (focal length over the vertical aperture, clipping range); null gives the view back. */
+    viewThrough(camera: DescriptionCamera | null): void {
+        if (!camera) {
+            if (this.#ownLens) {
+                Object.assign(this.camera, this.#ownLens)
+                this.#ownLens = null
+                this.camera.updateProjectionMatrix()
+                this.requestRender()
+            }
+            return
+        }
+        this.#ownLens ??= { fov: this.camera.fov, near: this.camera.near, far: this.camera.far }
+        this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(camera.verticalAperture / (2 * camera.focalLength)))
+        this.camera.near = Math.max(1e-4, camera.clippingRange[0])
+        this.camera.far = Math.max(this.camera.near * 2, camera.clippingRange[1])
+        this.camera.updateProjectionMatrix()
+        // a USD camera looks down its -z with +y up, as three's does; orbiting then pivots about a point ahead of it
+        const turn = new THREE.Quaternion(...camera.quat)
+        const position = new THREE.Vector3(...camera.xyz)
+        const ahead = new THREE.Vector3(0, 0, -1).applyQuaternion(turn)
+        this.#place(position.clone().add(ahead), position)
     }
 
     /**
@@ -475,7 +602,7 @@ export class Viewer {
      * have grown outside the box already aimed at, so a scene that is only moving re-fits once and then stops.
      */
     #fitShadows(): void {
-        if (!this.#shadowCasters.length) {
+        if (!this.#shadowCasters.length && !this.#localCasters.length) {
             return
         }
         const box = new THREE.Box3()
@@ -511,11 +638,28 @@ export class Viewer {
         for (const light of this.#shadowCasters) {
             aimShadow(light, box)
         }
+        const reach = box.getSize(new THREE.Vector3()).length()
+        const centre = box.getCenter(new THREE.Vector3())
+        for (const { light, radius } of this.#localCasters) {
+            const camera = light.shadow.camera
+            camera.near = 0.05
+            camera.far = Math.max(1, light.position.distanceTo(centre) + reach)
+            camera.updateProjectionMatrix()
+            // a sphere's penumbra spans the angle it subtends from the scene's middle, in texels of a quarter-turn cube face
+            const across = Math.max(0.5, light.position.distanceTo(centre))
+            light.shadow.radius = Math.max(
+                1,
+                (Math.atan(radius / across) / (Math.PI / 2)) * this.#localShadowTexels(light),
+            )
+            // two texels' width where the scene is, as the sun's normalBias is set (shadows.ts)
+            light.shadow.normalBias = 2 * ((2 * across) / this.#localShadowTexels(light))
+            light.shadow.needsUpdate = true
+        }
         this.requestRender()
     }
 
     /** The sky a scene's dome light stands for, behind everything and taking no depth. `own`: made here, so ours to dispose. */
-    #setSky(texture: THREE.Texture, own: boolean) {
+    #setSky(texture: THREE.Texture, own: boolean, rotation: THREE.Euler) {
         if (this.#ownSky) {
             this.#sky?.dispose()
         }
@@ -524,7 +668,7 @@ export class Viewer {
         this.scene.background = texture
         this.scene.backgroundIntensity = 1
         // three samples the background on world Y; this viewer is Z-up, so the picture has to be turned
-        this.scene.backgroundRotation.set(SKY_ROTATION_X, 0, 0)
+        this.scene.backgroundRotation.copy(rotation)
     }
 
     /** The sky, pre-filtered into something a PBR material can be lit by. Cached per sky texture. */
