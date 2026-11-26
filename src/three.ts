@@ -137,9 +137,11 @@ export {
 } from "./map2d/math.ts"
 export { basePose, Kinematics, urdfPositions } from "./three/urdf/description.ts"
 export type {
+    DescriptionCamera,
     DescriptionGeometry,
     DescriptionJoint,
     DescriptionLink,
+    DescriptionTexture,
     JointPositions,
     Origin,
     RobotDescription,
@@ -147,7 +149,7 @@ export type {
 export { decodeMeshFile, meshGeometry, meshUris, parseUrdf } from "./three/urdf/parse.ts"
 export { meshLooks, meshTextures } from "./three/urdf/usd_mesh.ts"
 export type { MeshLook } from "./three/urdf/usd_mesh.ts"
-export { isUsda, parsePrims, parseUsda, usdaAssetHashes, usdaMeshUris } from "./three/urdf/usda.ts"
+export { isUsda, parsePrims, parseUsda, usdaAssetHashes, usdaMeshUris, usdaSublayers } from "./three/urdf/usda.ts"
 export type { Prim } from "./three/urdf/usda.ts"
 export { solveIk } from "./three/urdf/ik.ts"
 export type { IkResult } from "./three/urdf/ik.ts"

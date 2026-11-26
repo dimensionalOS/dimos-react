@@ -10,15 +10,20 @@
 // line's last character. A dimos layer keeps the URDF it could not convert in customData as a triple-quoted string,
 // and that XML contains braces, so a brace-counting reader walks straight off the end of the tree.
 //
-// Only text layers (.usda). A crate .usdc is binary and never travels over the file bus.
+// Composition: internal arcs, sublayers (the caller fetches them), variants and PointInstancers; over/class/inactive prims are not drawn.
+import * as THREE from "three"
+import { inlineMeshGeometry } from "./usd_mesh.ts"
 import type {
+    DescriptionCamera,
     DescriptionGeometry,
     DescriptionJoint,
     DescriptionLight,
     DescriptionLink,
     DescriptionLook,
+    DescriptionTexture,
     Origin,
     RobotDescription,
+    TextureSlot,
 } from "./description.ts"
 
 /** One prim: its type, its name, what it says about itself, and what is inside it. */
@@ -37,6 +42,14 @@ export interface Prim {
     values?: Record<string, unknown>
     /** `variantSet "name" = { "choice" { ... } }`, each choice's body as text, until the selected one is applied */
     variantBodies?: Record<string, Record<string, string>>
+    /** `over` or `class` (absent: `def`): neither is drawn unless composition gives it a def */
+    specifier?: "over" | "class"
+}
+
+/** A stage's own units: metres per unit (UsdGeom's metersPerUnit) and which axis is up. */
+export interface StageMetrics {
+    metersPerUnit?: number
+    upAxis?: "Y" | "Z"
 }
 
 const RIGID_BODY = "PhysicsRigidBodyAPI"
@@ -62,15 +75,49 @@ export function isUsda(text: string): boolean {
  * Throws when the text is not a USD layer at all. A layer with no links gives a description with none, which the
  * caller can tell apart from a failure.
  */
-export function parseUsda(text: string): RobotDescription {
+export function parseUsda(text: string, options: { layers?: ReadonlyMap<string, string> } = {}): RobotDescription {
     if (!isUsda(text)) {
         throw new Error("not a USD layer: no #usda header")
     }
-    return describe(parsePrims(text), defaultPrimName(text))
+    const roots = withSublayers(parsePrims(text), text, options.layers ?? new Map())
+    return describe(roots, defaultPrimName(text), stageMetrics(text))
 }
 
-/** The prims of a layer (text or crate) as a RobotDescription. */
-export function describe(roots: Prim[], defaultPrim: string | null): RobotDescription {
+/** The layers a layer's `subLayers` names, strongest first, as authored: the caller fetches them for parseUsda. */
+export function usdaSublayers(text: string): string[] {
+    const listed = layerMetadata(text)["subLayers"] ?? ""
+    return [...listed.matchAll(/@([^@]+)@/g)].map((match) => match[1])
+}
+
+/** The header's metersPerUnit and upAxis, where it states them. */
+export function stageMetrics(text: string): StageMetrics {
+    const header = layerMetadata(text)
+    const metres = Number(header["metersPerUnit"])
+    const up = unquote(header["upAxis"] ?? "")
+    return {
+        ...(header["metersPerUnit"] !== undefined && metres > 0 ? { metersPerUnit: metres } : {}),
+        ...(up === "Y" || up === "Z" ? { upAxis: up } : {}),
+    }
+}
+
+/** A layer's sublayers composed under it, each weaker than the one before (and their own sublayers under them). */
+function withSublayers(roots: Prim[], text: string, layers: ReadonlyMap<string, string>, depth = 0): Prim[] {
+    for (const path of usdaSublayers(text)) {
+        const sub = layers.get(path)
+        if (sub === undefined || depth > 8) continue
+        const weaker = isUsda(sub) ? withSublayers(parsePrims(sub), sub, layers, depth + 1) : []
+        for (const prim of weaker) {
+            const strong = roots.find((root) => root.name === prim.name)
+            if (strong) mergeInto(strong, prim, (value) => value)
+            else roots.push(prim)
+        }
+    }
+    return roots
+}
+
+/** The prims of a layer (text or crate) as a RobotDescription, in metres and Z-up. */
+export function describe(roots: Prim[], defaultPrim: string | null, metrics: StageMetrics = {}): RobotDescription {
+    composePrims(roots)
     indexMaterials(roots)
     const links: DescriptionLink[] = []
     const prims: Prim[] = []
@@ -79,7 +126,7 @@ export function describe(roots: Prim[], defaultPrim: string | null): RobotDescri
         Prim,
         { visuals: DescriptionGeometry[]; collisions: DescriptionGeometry[]; drawable: DescriptionGeometry[] }
     >()
-    walk(roots, (prim) => {
+    walkDrawn(roots, (prim) => {
         if (isLink(prim) || prim === sceneRoot) {
             prims.push(prim)
             shapes.set(prim, { visuals: [], collisions: [], drawable: [] })
@@ -109,7 +156,8 @@ export function describe(roots: Prim[], defaultPrim: string | null): RobotDescri
     const joints = jointsOf(roots, prims, sceneRoot)
     const childLinks = new Set(joints.map((joint) => joint.child))
     const root = links.find((link) => !childLinks.has(link.name))?.name ?? links[0]?.name ?? ""
-    return {
+    const settings = renderSettingsOf(roots)
+    return inMetresZUp({
         name: defaultPrim ?? roots[0]?.name ?? "robot",
         base_link: root,
         base_frame: root,
@@ -117,8 +165,82 @@ export function describe(roots: Prim[], defaultPrim: string | null): RobotDescri
         joint_names: joints.filter((joint) => joint.type !== "fixed" && !joint.mimic).map((joint) => joint.name),
         links,
         joints,
-        lights: lightsOf(roots),
-        look: lookOf(roots),
+        lights: lightsOf(roots, sceneRoot),
+        look: lookOf(roots, settings),
+        cameras: camerasOf(roots, sceneRoot, settings),
+    }, metrics)
+}
+
+/** In metres and Z-up: lengths times metersPerUnit (unauthored: 1, as dimos's layers are), a Y-up stage turned at its roots. */
+function inMetresZUp(description: RobotDescription, metrics: StageMetrics): RobotDescription {
+    const unit = metrics.metersPerUnit ?? 1
+    const turn: [number, number, number, number] = metrics.upAxis === "Y"
+        ? [Math.SQRT1_2, 0, 0, Math.SQRT1_2]
+        : [0, 0, 0, 1]
+    if (unit === 1 && turn[3] === 1) return description
+    const length = (value: number | undefined) => value === undefined ? undefined : value * unit
+    const v3 = (
+        value: [number, number, number],
+    ): [number, number, number] => [value[0] * unit, value[1] * unit, value[2] * unit]
+    const turned = (origin: Origin): Origin => ({ xyz: rotate(turn, origin.xyz), quat: multiply(turn, origin.quat) })
+    const children = new Set(description.joints.map((joint) => joint.child))
+    const roots = new Set(description.links.filter((link) => !children.has(link.name)).map((link) => link.name))
+    const geometry = (item: DescriptionGeometry, root: boolean): DescriptionGeometry => {
+        const origin = { xyz: v3(item.origin.xyz), quat: item.origin.quat }
+        const out: DescriptionGeometry = { ...item, origin: root ? turned(origin) : origin }
+        if (item.size) out.size = v3(item.size)
+        if (item.radius !== undefined) out.radius = length(item.radius)
+        if (item.length !== undefined) out.length = length(item.length)
+        // a mesh's points are in the stage's units too: its scale carries the conversion
+        if (item.type === "mesh") out.scale = v3(item.scale ?? [1, 1, 1])
+        return out
+    }
+    const placed = <
+        T extends {
+            xyz: [number, number, number]
+            quat?: [number, number, number, number]
+            origin?: Origin
+            link?: string
+        },
+    >(
+        item: T,
+    ): T => {
+        const quat = multiply(turn, item.quat ?? [0, 0, 0, 1])
+        const origin = item.origin
+            ? (item.link !== undefined && roots.has(item.link) ? turned : (o: Origin) => o)({
+                xyz: v3(item.origin.xyz),
+                quat: item.origin.quat,
+            })
+            : undefined
+        return { ...item, xyz: rotate(turn, v3(item.xyz)), quat, ...(origin ? { origin } : {}) }
+    }
+    return {
+        ...description,
+        links: description.links.map((link) => ({
+            ...link,
+            visuals: link.visuals.map((item) => geometry(item, roots.has(link.name))),
+            collisions: link.collisions.map((item) => geometry(item, roots.has(link.name))),
+        })),
+        joints: description.joints.map((joint) => {
+            const origin = { xyz: v3(joint.origin.xyz), quat: joint.origin.quat }
+            const limit = joint.type === "prismatic" && joint.limit
+                ? { limit: [joint.limit[0] * unit, joint.limit[1] * unit] as [number, number] }
+                : {}
+            return { ...joint, origin: roots.has(joint.parent) ? turned(origin) : origin, ...limit }
+        }),
+        lights: description.lights?.map((light) => ({
+            ...placed(light),
+            direction: rotate(turn, light.direction),
+            ...(light.width !== undefined ? { width: length(light.width) } : {}),
+            ...(light.height !== undefined ? { height: length(light.height) } : {}),
+            ...(light.radius !== undefined ? { radius: length(light.radius) } : {}),
+            ...(light.length !== undefined ? { length: length(light.length) } : {}),
+        })),
+        cameras: description.cameras?.map((camera) => ({
+            ...placed(camera),
+            quat: multiply(turn, camera.quat),
+            clippingRange: [camera.clippingRange[0] * unit, camera.clippingRange[1] * unit] as [number, number],
+        })),
     }
 }
 
@@ -187,6 +309,7 @@ export function parsePrims(text: string): Prim[] {
                 attrs: {},
                 children: [],
                 ...(stack.length ? { parent: stack[stack.length - 1] } : {}),
+                ...(token.specifier !== "def" ? { specifier: token.specifier } : {}),
             }
             if (token.meta) {
                 Object.assign(prim.meta, parseAssignments(token.meta))
@@ -260,7 +383,7 @@ function applyVariants(prim: Prim): void {
 }
 
 type Token =
-    | { kind: "def"; primType: string; name: string; meta?: string }
+    | { kind: "def"; specifier: "def" | "over" | "class"; primType: string; name: string; meta?: string }
     | { kind: "assign"; key: string; value: string; meta?: string }
     | { kind: "close" }
 
@@ -284,6 +407,7 @@ function scan(text: string): Token[] {
         if (next.kind === "def") {
             tokens.push({
                 kind: "def",
+                specifier: next.specifier ?? "def",
                 primType: next.primType,
                 name: next.name,
                 ...(next.meta ? { meta: next.meta } : {}),
@@ -304,6 +428,7 @@ interface Found {
     end: number
     /** false for a prim written with no `{ ... }`, which has no children to read */
     body?: boolean
+    specifier?: "def" | "over" | "class"
     primType: string
     name: string
     meta?: string
@@ -382,6 +507,7 @@ function readDef(text: string, at: number): Found {
         kind: "def",
         end: body ? scanAt + 1 : scanAt,
         body,
+        specifier: words[0] === "over" ? "over" : words[0] === "class" ? "class" : "def",
         primType,
         name: quoted ? quoted[1] : "",
         ...(meta !== undefined ? { meta } : {}),
@@ -520,11 +646,214 @@ function defaultPrimName(text: string): string | null {
     return match ? match[1] : null
 }
 
+/** The layer's own `( ... )` block after `#usda`, by key. */
+function layerMetadata(text: string): Record<string, string> {
+    const header = text.indexOf("(")
+    if (header === -1 || !/^\s*#usda[^\n]*\n\s*$/.test(text.slice(0, header))) return {}
+    return parseAssignments(text.slice(header + 1, matching(text, header, "(", ")")))
+}
+
 function walk(prims: Prim[], visit: (prim: Prim) => void): void {
     for (const prim of prims) {
         visit(prim)
         walk(prim.children, visit)
     }
+}
+
+/** walk, over only what USD draws: defined (no `over`/`class` left), active, and not a PointInstancer's prototype. */
+function walkDrawn(prims: Prim[], visit: (prim: Prim) => void): void {
+    for (const prim of prims) {
+        if (!drawnItself(prim)) continue
+        visit(prim)
+        walkDrawn(prim.children, visit)
+    }
+}
+
+/** Prototypes a PointInstancer draws copies of: the prims themselves are not drawn where they stand. */
+const prototypes = new WeakSet<Prim>()
+
+function drawnItself(prim: Prim): boolean {
+    return !prim.specifier && unquote(prim.meta["active"] ?? "") !== "false" && !prototypes.has(prim)
+}
+
+/** Whether USD's default traversal reaches this prim: it and every ancestor defined, active and not a prototype. */
+export function defined(prim: Prim): boolean {
+    for (let at: Prim | undefined = prim; at; at = at.parent) {
+        if (!drawnItself(at)) return false
+    }
+    return true
+}
+
+// ---- composition -------------------------------------------------------------
+
+const composedRoots = new WeakSet<Prim[]>()
+const ARCS = ["references", "payload", "inherits", "specializes"]
+
+/** Internal arcs (`</path>` references, payloads, inherits, specializes) composed in weaker than the prim's own, then PointInstancers expanded. */
+export function composePrims(roots: Prim[]): Prim[] {
+    if (composedRoots.has(roots)) return roots
+    composedRoots.add(roots)
+    const byPath = new Map<string, Prim>()
+    walk(roots, (prim) => byPath.set(pathOf(prim), prim))
+    const done = new Set<Prim>()
+    const visiting = new Set<Prim>()
+    const compose = (prim: Prim): void => {
+        if (done.has(prim) || visiting.has(prim)) return
+        visiting.add(prim)
+        const here = pathOf(prim)
+        for (const arc of ARCS) {
+            for (const target of internalTargets(prim.meta[arc])) {
+                const source = byPath.get(target)
+                // an arc to itself or to an ancestor would compose without end
+                if (!source || here === target || here.startsWith(`${target}/`)) continue
+                compose(source)
+                mergeInto(prim, source, pathRewrite(target, here))
+            }
+        }
+        visiting.delete(prim)
+        done.add(prim)
+        for (const child of prim.children) compose(child)
+    }
+    roots.forEach(compose)
+    walk(roots, (prim) => {
+        if (prim.type === "PointInstancer") expandInstancer(prim, byPath)
+    })
+    return roots
+}
+
+/** The prim paths an arc names in this layer: `</a/b>`, not `@file@</a/b>` (another file's) or `@file@`. */
+function internalTargets(value: string | undefined): string[] {
+    if (!value) return []
+    const local = value.replace(/@[^@]*@\s*(<[^>]*>)?/g, "")
+    return [...local.matchAll(/<([^>]+)>/g)].map((match) => match[1])
+}
+
+/** Every `<from...>` in a value pointed at the same place under `to` instead. */
+function pathRewrite(from: string, to: string): (value: string) => string {
+    const escaped = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const pattern = new RegExp(`<${escaped}(?=[/.>\\[])`, "g")
+    return (value) => value.replace(pattern, `<${to}`)
+}
+
+/** `source`'s opinions under `dest`'s: what dest says wins, children of the same name merge, the rest are copied in. */
+function mergeInto(dest: Prim, source: Prim, rewrite: (value: string) => string): void {
+    if (!dest.type) dest.type = source.type
+    // the composed specifier is the strongest defining one: an over on a def is a def
+    if (dest.specifier === "over" && source.specifier !== "over") {
+        if (source.specifier) dest.specifier = source.specifier
+        else delete dest.specifier
+    }
+    dest.displayName ??= source.displayName
+    for (const [key, value] of Object.entries(source.meta)) {
+        if (ARCS.includes(key) && internalTargets(value).length) continue
+        if (key === "apiSchemas" && dest.meta[key] !== undefined) {
+            const names = new Set([...`${dest.meta[key]} ${value}`.matchAll(/"([^"]+)"/g)].map((match) => match[1]))
+            dest.meta[key] = `[${[...names].map((name) => `"${name}"`).join(", ")}]`
+        } else {
+            dest.meta[key] ??= rewrite(value)
+        }
+    }
+    for (const [key, value] of Object.entries(source.attrs)) dest.attrs[key] ??= rewrite(value)
+    if (source.values) {
+        dest.values ??= {}
+        for (const [key, value] of Object.entries(source.values)) dest.values[key] ??= value
+    }
+    for (const child of source.children) {
+        const mine = dest.children.find((each) => each.name === child.name)
+        if (mine) mergeInto(mine, child, rewrite)
+        else dest.children.push(clonePrim(child, dest, rewrite))
+    }
+}
+
+/** A deep copy of a prim under `parent`, its paths rewritten, its internal arcs already composed into it. */
+function clonePrim(prim: Prim, parent: Prim | undefined, rewrite: (value: string) => string): Prim {
+    const meta: Record<string, string> = {}
+    for (const [key, value] of Object.entries(prim.meta)) {
+        if (!(ARCS.includes(key) && internalTargets(value).length)) meta[key] = rewrite(value)
+    }
+    const attrs: Record<string, string> = {}
+    for (const [key, value] of Object.entries(prim.attrs)) attrs[key] = rewrite(value)
+    const copy: Prim = {
+        type: prim.type,
+        name: prim.name,
+        meta,
+        attrs,
+        children: [],
+        ...(parent ? { parent } : {}),
+        ...(prim.displayName !== undefined ? { displayName: prim.displayName } : {}),
+        ...(prim.specifier ? { specifier: prim.specifier } : {}),
+        ...(prim.values ? { values: { ...prim.values } } : {}),
+    }
+    copy.children = prim.children.map((child) => clonePrim(child, copy, rewrite))
+    return copy
+}
+
+/** An attribute as numbers: a crate's typed value as it is stored, else the text's. */
+function numbersIn(prim: Prim, name: string): ArrayLike<number> {
+    const value = prim.values?.[name]
+    if (value instanceof Float32Array || value instanceof Float64Array || value instanceof Int32Array) return value
+    if (Array.isArray(value) && value.every((item) => typeof item === "number")) return value as number[]
+    if (value && typeof value === "object" && "values" in value) return (value as { values: ArrayLike<number> }).values
+    return numbers(prim.attrs[name])
+}
+
+/** A quaternion array as (x, y, z, w) each: a crate stores them so, a text layer writes (w, x, y, z). */
+function quatsIn(prim: Prim, name: string): number[] {
+    const stored = prim.values?.[name]
+    const raw = Array.from(numbersIn(prim, name))
+    if (stored && typeof stored === "object" && "shape" in stored) return raw
+    const out: number[] = []
+    for (let index = 0; index + 3 < raw.length; index += 4) {
+        out.push(raw[index + 1], raw[index + 2], raw[index + 3], raw[index])
+    }
+    return out
+}
+
+/** A PointInstancer's instances as Xforms holding a copy of their prototype, which is then not drawn where it stands. */
+function expandInstancer(instancer: Prim, byPath: Map<string, Prim>): void {
+    const targets = [...(instancer.attrs["prototypes"] ?? "").matchAll(/<([^>]+)>/g)].map((match) => match[1])
+    const protos = targets.map((path) => byPath.get(path))
+    protos.forEach((proto) => proto && prototypes.add(proto))
+    const indices = numbersIn(instancer, "protoIndices")
+    const positions = numbersIn(instancer, "positions")
+    const orientations = quatsIn(instancer, "orientations")
+    const scales = numbersIn(instancer, "scales")
+    const ids = numbersIn(instancer, "ids")
+    const hidden = new Set(Array.from(numbersIn(instancer, "invisibleIds")))
+    const here = pathOf(instancer)
+    const matrix = new THREE.Matrix4()
+    for (let index = 0; index < indices.length; index++) {
+        const proto = protos[indices[index]]
+        if (!proto || hidden.has(ids.length ? ids[index] : index)) continue
+        const name = `instance_${index}`
+        matrix.compose(
+            new THREE.Vector3(positions[index * 3] ?? 0, positions[index * 3 + 1] ?? 0, positions[index * 3 + 2] ?? 0),
+            orientations.length >= index * 4 + 4
+                ? new THREE.Quaternion(...orientations.slice(index * 4, index * 4 + 4))
+                : new THREE.Quaternion(),
+            scales.length >= index * 3 + 3
+                ? new THREE.Vector3(scales[index * 3], scales[index * 3 + 1], scales[index * 3 + 2])
+                : new THREE.Vector3(1, 1, 1),
+        )
+        const placed: Prim = {
+            type: "Xform",
+            name,
+            meta: {},
+            attrs: { "xformOp:transform": matrixText(matrix), "xformOpOrder": `["xformOp:transform"]` },
+            children: [],
+            parent: instancer,
+        }
+        const copy = clonePrim(proto, placed, pathRewrite(pathOf(proto), `${here}/${name}/${proto.name}`))
+        delete copy.specifier
+        placed.children.push(copy)
+        instancer.children.push(placed)
+    }
+}
+
+/** A three matrix as USD writes a matrix4d: row by row, the translation last (three's column-major elements, in order). */
+function matrixText(matrix: THREE.Matrix4): string {
+    const e = matrix.elements
+    return `( ${[0, 1, 2, 3].map((row) => `(${e.slice(row * 4, row * 4 + 4).join(", ")})`).join(", ")} )`
 }
 
 // ---- prims as a robot -----------------------------------------------------
@@ -553,135 +882,140 @@ export interface Placement extends Origin {
     scale: [number, number, number]
 }
 
-const IDENTITY: Placement = { xyz: [0, 0, 0], quat: [0, 0, 0, 1], scale: [1, 1, 1] }
-
-/** A prim's own transform, as the origin a URDF would state. */
-function placementOf(prim: Prim): Origin {
-    const { xyz, quat } = xformOf(prim)
-    return { xyz, quat }
+/** A prim's xformOps composed in xformOpOrder (first outermost), as where it is, how it is turned and how scaled. */
+export function xformOf(prim: Prim): Placement {
+    return decompose(localMatrix(prim).matrix)
 }
 
-/** A prim's xformOps composed in xformOpOrder (first outermost), with scale kept innermost as the shape's size. */
-export function xformOf(prim: Prim): Placement {
+/** A prim's xformOps as one matrix (first listed outermost, `!invert!` inverted), and whether it has `!resetXformStack!`. */
+export function localMatrix(prim: Prim): { matrix: THREE.Matrix4; resets: boolean } {
     const order = [...(prim.attrs["xformOpOrder"] ?? "").matchAll(/"([^"]+)"/g)].map((match) => match[1])
     // a layer that states ops without an order (older dimos layers) is read in the usual one
     const ops = order.length > 0
         ? order
         : ["xformOp:transform", "xformOp:translate", "xformOp:orient", "xformOp:scale"].filter((op) => op in prim.attrs)
-    let out: Placement = IDENTITY
-    let scale: [number, number, number] = [1, 1, 1]
+    const matrix = new THREE.Matrix4()
+    let resets = false
     for (const op of ops) {
+        if (op === "!resetXformStack!") {
+            resets = true
+            matrix.identity()
+            continue
+        }
         const inverse = op.startsWith("!invert!")
         const name = inverse ? op.slice(8) : op
-        if (inverse || name === "!resetXformStack!") continue
-        const placed = opPlacement(name, numbers(prim.attrs[name]))
-        // a scale is the shape's size, innermost wherever it is listed: dimos lists it first, before the transform
-        if (name.split(":")[1] === "scale") scale = placed.scale
-        else out = composePlacement(out, placed)
+        const value = Array.from(numbersIn(prim, name))
+        const one = opMatrix(name, value)
+        matrix.multiply(inverse ? one.invert() : one)
     }
-    return { ...out, scale: [out.scale[0] * scale[0], out.scale[1] * scale[1], out.scale[2] * scale[2]] }
+    return { matrix, resets }
 }
 
-function opPlacement(name: string, value: number[]): Placement {
+function opMatrix(name: string, value: number[]): THREE.Matrix4 {
     const kind = name.split(":")[1] ?? ""
     const degrees = Math.PI / 180
-    const about = (axis: 0 | 1 | 2, angle: number): [number, number, number, number] => {
-        const q: [number, number, number, number] = [0, 0, 0, Math.cos(angle * degrees / 2)]
-        q[axis] = Math.sin(angle * degrees / 2)
-        return q
-    }
-    if (kind === "translate" && value.length >= 3) return { ...IDENTITY, xyz: [value[0], value[1], value[2]] }
+    const out = new THREE.Matrix4()
+    if (kind === "translate" && value.length >= 3) return out.makeTranslation(value[0], value[1], value[2])
     // USD writes a quatf as (w, x, y, z); three wants (x, y, z, w).
-    if (kind === "orient" && value.length >= 4) return { ...IDENTITY, quat: [value[1], value[2], value[3], value[0]] }
+    if (kind === "orient" && value.length >= 4) {
+        return out.makeRotationFromQuaternion(new THREE.Quaternion(value[1], value[2], value[3], value[0]).normalize())
+    }
     if (kind === "scale") {
-        return {
-            ...IDENTITY,
-            scale: value.length >= 3 ? [value[0], value[1], value[2]] : [value[0] ?? 1, value[0] ?? 1, value[0] ?? 1],
-        }
+        return value.length >= 3
+            ? out.makeScale(value[0], value[1], value[2])
+            : out.makeScale(value[0] ?? 1, value[0] ?? 1, value[0] ?? 1)
     }
-    if (kind === "rotateX" || kind === "rotateY" || kind === "rotateZ") {
-        return { ...IDENTITY, quat: about("XYZ".indexOf(kind[6]) as 0 | 1 | 2, value[0] ?? 0) }
-    }
+    if (kind === "rotateX") return out.makeRotationX((value[0] ?? 0) * degrees)
+    if (kind === "rotateY") return out.makeRotationY((value[0] ?? 0) * degrees)
+    if (kind === "rotateZ") return out.makeRotationZ((value[0] ?? 0) * degrees)
     const rotation = kind.match(/^rotate([XYZ]{3})$/)
     if (rotation && value.length >= 3) {
         // rotateXYZ turns about X first, then Y, then Z: as a product the last axis is outermost
-        let quat: [number, number, number, number] = [0, 0, 0, 1]
         for (const axis of rotation[1]) {
-            const index = "XYZ".indexOf(axis) as 0 | 1 | 2
-            quat = multiply(about(index, value[index]), quat)
+            const index = "XYZ".indexOf(axis)
+            const turn = new THREE.Matrix4()
+            if (index === 0) turn.makeRotationX(value[0] * degrees)
+            else if (index === 1) turn.makeRotationY(value[1] * degrees)
+            else turn.makeRotationZ(value[2] * degrees)
+            out.premultiply(turn)
         }
-        return { ...IDENTITY, quat }
+        return out
     }
-    if (kind === "transform" && value.length >= 16) {
-        // USD writes a matrix4d row by row, and the translation is its last row; each row's length is that axis' scale.
-        const scale = [0, 1, 2].map((row) => Math.hypot(value[row * 4], value[row * 4 + 1], value[row * 4 + 2]) || 1)
-        const unit = value.map((entry, index) =>
-            index < 12 && index % 4 < 3 ? entry / scale[Math.floor(index / 4)] : entry
-        )
-        return {
-            xyz: [value[12], value[13], value[14]],
-            quat: quatFromRows(unit),
-            scale: scale as [number, number, number],
-        }
-    }
-    return IDENTITY
+    // USD writes a matrix4d row by row with the translation last: three's column-major elements in the same order
+    if (kind === "transform" && value.length >= 16) return out.fromArray(value)
+    return out
 }
 
-/** `parent` then `child`: the child's offset turned and scaled by the parent's, its scale times the parent's. */
-function composePlacement(parent: Placement, child: Placement): Placement {
-    const scaled: [number, number, number] = [
-        child.xyz[0] * parent.scale[0],
-        child.xyz[1] * parent.scale[1],
-        child.xyz[2] * parent.scale[2],
-    ]
-    const turned = rotate(parent.quat, scaled)
+/** A matrix as a translation, rotation and scale (a shear, which a placement cannot hold, is dropped). */
+function decompose(matrix: THREE.Matrix4): Placement {
+    const position = new THREE.Vector3()
+    const rotation = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    matrix.decompose(position, rotation, scale)
     return {
-        xyz: [parent.xyz[0] + turned[0], parent.xyz[1] + turned[1], parent.xyz[2] + turned[2]],
-        quat: multiply(parent.quat, child.quat),
-        scale: [parent.scale[0] * child.scale[0], parent.scale[1] * child.scale[1], parent.scale[2] * child.scale[2]],
+        xyz: [position.x, position.y, position.z],
+        quat: [rotation.x, rotation.y, rotation.z, rotation.w],
+        scale: [scale.x, scale.y, scale.z],
     }
 }
 
-/** The rotation of a row-major 4x4 as (x, y, z, w). */
-function quatFromRows(m: number[]): [number, number, number, number] {
-    // the 3x3 in column-vector convention, which is the transpose of USD's rows
-    const r = [
-        [m[0], m[4], m[8]],
-        [m[1], m[5], m[9]],
-        [m[2], m[6], m[10]],
-    ]
-    const trace = r[0][0] + r[1][1] + r[2][2]
-    if (trace > 0) {
-        const s = Math.sqrt(trace + 1) * 2
-        return [(r[2][1] - r[1][2]) / s, (r[0][2] - r[2][0]) / s, (r[1][0] - r[0][1]) / s, s / 4]
-    }
-    if (r[0][0] > r[1][1] && r[0][0] > r[2][2]) {
-        const s = Math.sqrt(1 + r[0][0] - r[1][1] - r[2][2]) * 2
-        return [s / 4, (r[0][1] + r[1][0]) / s, (r[0][2] + r[2][0]) / s, (r[2][1] - r[1][2]) / s]
-    }
-    if (r[1][1] > r[2][2]) {
-        const s = Math.sqrt(1 + r[1][1] - r[0][0] - r[2][2]) * 2
-        return [(r[0][1] + r[1][0]) / s, s / 4, (r[1][2] + r[2][1]) / s, (r[0][2] - r[2][0]) / s]
-    }
-    const s = Math.sqrt(1 + r[2][2] - r[0][0] - r[1][1]) * 2
-    return [(r[0][2] + r[2][0]) / s, (r[1][2] + r[2][1]) / s, s / 4, (r[1][0] - r[0][1]) / s]
+/** A prim's transform in the stage: every transform above it, down to (and with) its own, as USD composes them. */
+export function worldMatrix(prim: Prim): THREE.Matrix4 {
+    const chain: Prim[] = []
+    for (let at: Prim | undefined = prim; at; at = at.parent) chain.unshift(at)
+    return chain.reduce((placed, at) => {
+        const { matrix, resets } = localMatrix(at)
+        return resets ? matrix : placed.multiply(matrix)
+    }, new THREE.Matrix4())
 }
 
 /** What a bound material says a surface looks like: UsdPreviewSurface's inputs, resolved through connections. */
 interface Surface {
     color?: [number, number, number]
-    /** the image its diffuseColor reads, when it reads one */
-    texture?: string
-    /** the primvar that image's coordinates come from (its UsdPrimvarReader_float2's varname) */
-    coordinates?: string
+    /** the images its inputs read, by the input */
+    textures: Partial<Record<TextureSlot, DescriptionTexture>>
+    /** the primvar its diffuseColor reads (a UsdPrimvarReader_float3, usually displayColor), per vertex */
+    colorPrimvar?: string
     opacity?: number
     roughness?: number
     metallic?: number
     ior?: number
+    emissive?: [number, number, number]
+    opacityThreshold?: number
+    clearcoat?: number
+    clearcoatRoughness?: number
+    /** a UsdPreviewSurface, whose unstated inputs are its schema's defaults rather than nothing */
+    preview: boolean
 }
+
+/** UsdPreviewSurface's scalar inputs and their schema defaults (pxr usdImaging/usdShaders shaderDefs) */
+const PREVIEW_SCALARS = [
+    ["opacity", "inputs:opacity", 1],
+    ["roughness", "inputs:roughness", 0.5],
+    ["metallic", "inputs:metallic", 0],
+    ["ior", "inputs:ior", undefined],
+    ["opacityThreshold", "inputs:opacityThreshold", 0],
+    ["clearcoat", "inputs:clearcoat", 0],
+    ["clearcoatRoughness", "inputs:clearcoatRoughness", 0.01],
+] as const
+
+/** the inputs that can read an image, and the slot it fills */
+const TEXTURE_INPUTS: [TextureSlot, string][] = [
+    ["diffuse", "inputs:diffuseColor"],
+    ["emissive", "inputs:emissiveColor"],
+    ["normal", "inputs:normal"],
+    ["occlusion", "inputs:occlusion"],
+    ["roughness", "inputs:roughness"],
+    ["metallic", "inputs:metallic"],
+    ["opacity", "inputs:opacity"],
+    ["clearcoat", "inputs:clearcoat"],
+    ["clearcoatRoughness", "inputs:clearcoatRoughness"],
+]
 
 /** Every Material's surface by path, refilled per parse: a geom binds by absolute path from anywhere in the tree. */
 const surfaces = new Map<string, Surface>()
+/** every prim by path, for the collections a binding names */
+let primsByPath = new Map<string, Prim>()
 
 /** Index a layer's materials for surfaceLook: the main description does it itself, a mesh layer's reader calls this. */
 export function describeMaterials(roots: Prim[]): void {
@@ -692,6 +1026,7 @@ function indexMaterials(roots: Prim[]): void {
     surfaces.clear()
     const byPath = new Map<string, Prim>()
     walk(roots, (prim) => byPath.set(pathOf(prim), prim))
+    primsByPath = byPath
     walk(roots, (prim) => {
         if (prim.type === "Material") surfaces.set(pathOf(prim), surfaceOf(prim, byPath))
     })
@@ -709,27 +1044,38 @@ function surfaceOf(material: Prim, byPath: Map<string, Prim>): Surface {
     if (!shader) {
         // a material with no shader states its colour on itself, as dimos's older layers do
         const own = numbers(material.attrs["inputs:color"])
-        return own.length >= 3 ? { color: [own[0], own[1], own[2]] } : {}
+        return own.length >= 3
+            ? { color: [own[0], own[1], own[2]], textures: {}, preview: false }
+            : { textures: {}, preview: false }
     }
-    const out: Surface = {}
+    const preview = unquote(shader.attrs["info:id"] ?? "") === "UsdPreviewSurface"
+    const out: Surface = { textures: {}, preview }
+    for (const [slot, name] of TEXTURE_INPUTS) {
+        const texture = inputOf(shader, name, byPath)?.texture
+        if (texture) out.textures[slot] = texture
+    }
     const diffuse = inputOf(shader, "inputs:diffuseColor", byPath)
     if (diffuse?.texture) {
-        out.texture = diffuse.texture
-        if (diffuse.coordinates) out.coordinates = diffuse.coordinates
         // the texture's scale multiplies what it reads, which is what three's colour does to a map
-        const scale = diffuse.scale ?? []
-        out.color = scale.length >= 3 ? [scale[0], scale[1], scale[2]] : [1, 1, 1]
-    } else if (diffuse?.value && diffuse.value.length >= 3) {
-        out.color = [diffuse.value[0], diffuse.value[1], diffuse.value[2]]
+        const scale = diffuse.texture.scale
+        out.color = scale ? [scale[0], scale[1], scale[2]] : [1, 1, 1]
+    } else if (diffuse?.primvar) {
+        out.colorPrimvar = diffuse.primvar
+    } else {
+        const value = diffuse?.value ?? numbers(material.attrs["inputs:diffuseColor"])
+        if (value.length >= 3) out.color = [value[0], value[1], value[2]]
+        else if (preview) out.color = [0.18, 0.18, 0.18]
     }
-    for (
-        const [key, name] of [["opacity", "inputs:opacity"], ["roughness", "inputs:roughness"], [
-            "metallic",
-            "inputs:metallic",
-        ], ["ior", "inputs:ior"]] as const
-    ) {
-        // the shader's own input, else the material's interface input of that name (MuJoCo's converter states them there)
-        const value = inputOf(shader, name, byPath)?.value?.[0] ?? numbers(material.attrs[name])[0]
+    const emissive = inputOf(shader, "inputs:emissiveColor", byPath)
+    const glow = emissive?.texture ? (emissive.texture.scale ?? [1, 1, 1]) : (emissive?.value ?? [])
+    if (glow.length >= 3 && (glow[0] > 0 || glow[1] > 0 || glow[2] > 0)) out.emissive = [glow[0], glow[1], glow[2]]
+    for (const [key, name, fallback] of PREVIEW_SCALARS) {
+        const input = inputOf(shader, name, byPath)
+        // a texture's scale, else the shader's input, else the material's own (MuJoCo puts them there), else the schema default
+        const value = input?.texture
+            ? (input.texture.scale?.[0] ?? 1)
+            : input?.value?.[0] ?? numbers(material.attrs[name])[0] ??
+                (preview ? fallback : undefined)
         if (value !== undefined && Number.isFinite(value)) out[key] = value
     }
     return out
@@ -743,27 +1089,25 @@ function connectionOf(value: string | undefined): { prim: string; attribute: str
     return dot === -1 ? { prim: path, attribute: "" } : { prim: path.slice(0, dot), attribute: path.slice(dot + 1) }
 }
 
-/** A shader input's value, following its connection to a material's interface or a UsdUVTexture's file. */
+/** A shader input: its value, or (following its connection through any interface input) an image or a primvar. */
 function inputOf(
     prim: Prim,
     name: string,
     byPath: Map<string, Prim>,
     depth = 0,
-): { value?: number[]; texture?: string; scale?: number[]; coordinates?: string } | null {
+): { value?: number[]; texture?: DescriptionTexture; primvar?: string } | null {
     const connection = connectionOf(prim.attrs[`${name}.connect`])
     if (connection && depth < 8) {
         const source = byPath.get(connection.prim)
         if (!source) return null
-        if (unquote(source.attrs["info:id"] ?? "") === "UsdUVTexture" && connection.attribute.startsWith("outputs:")) {
-            const file = (source.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)?.[1]
-            const coordinates = primvarRead(source, byPath)
-            return file
-                ? {
-                    texture: file,
-                    scale: numbers(source.attrs["inputs:scale"]),
-                    ...(coordinates ? { coordinates } : {}),
-                }
-                : null
+        const id = unquote(source.attrs["info:id"] ?? "")
+        if (id === "UsdUVTexture" && connection.attribute.startsWith("outputs:")) {
+            const texture = textureOf(source, connection.attribute.slice(8), byPath)
+            return texture ? { texture } : null
+        }
+        if (id.startsWith("UsdPrimvarReader") && connection.attribute.startsWith("outputs:")) {
+            const primvar = stringInput(source, "inputs:varname", byPath)
+            return primvar ? { primvar } : null
         }
         return inputOf(source, connection.attribute, byPath, depth + 1)
     }
@@ -771,49 +1115,171 @@ function inputOf(
     return value === undefined ? null : { value: numbers(value) }
 }
 
-/** The primvar a UsdUVTexture's `inputs:st` reads: its UsdPrimvarReader_float2's varname, through any interface input. */
-function primvarRead(texture: Prim, byPath: Map<string, Prim>): string | undefined {
-    const reader = connectionOf(texture.attrs["inputs:st.connect"])
-    let at = reader ? byPath.get(reader.prim) : undefined
-    let name = "inputs:varname"
+/** A token or string input, followed through its connection to the interface input that states it. */
+function stringInput(prim: Prim, name: string, byPath: Map<string, Prim>): string | undefined {
+    let at: Prim | undefined = prim
+    let attribute = name
     for (let depth = 0; at && depth < 8; depth++) {
-        const next = connectionOf(at.attrs[`${name}.connect`])
+        const next = connectionOf(at.attrs[`${attribute}.connect`])
         if (!next) {
-            const value = at.attrs[name]
+            const value = at.attrs[attribute]
             return value === undefined ? undefined : unquote(value)
         }
         at = byPath.get(next.prim)
-        name = next.attribute
+        attribute = next.attribute
     }
     return undefined
 }
 
-/** The material bound to a prim or, failing that, to the nearest ancestor that binds one. */
+const WRAPS = new Set(["repeat", "mirror", "clamp", "black"])
+
+/** A UsdUVTexture as the input reading `channel` of it sees it: its file, wrap, colour space, scale and bias, and st. */
+function textureOf(texture: Prim, channel: string, byPath: Map<string, Prim>): DescriptionTexture | null {
+    const file = (texture.attrs["inputs:file"] ?? "").match(/@([^@]+)@/)?.[1]
+    if (!file) return null
+    const wrap = (name: string) => {
+        const value = unquote(texture.attrs[name] ?? "")
+        // useMetadata (the default) asks the file, and a png or jpeg says nothing: repeat, as Storm samples it
+        return (WRAPS.has(value) ? value : "repeat") as DescriptionTexture["wrapS"]
+    }
+    const space = unquote(texture.attrs["inputs:sourceColorSpace"] ?? "")
+    const four = (name: string): [number, number, number, number] | undefined => {
+        const value = numbers(texture.attrs[name])
+        return value.length >= 4 ? [value[0], value[1], value[2], value[3]] : undefined
+    }
+    const scale = four("inputs:scale")
+    const bias = four("inputs:bias")
+    const out: DescriptionTexture = {
+        file,
+        channel:
+            (["r", "g", "b", "a", "rgb", "rgba"].includes(channel) ? channel : "rgb") as DescriptionTexture["channel"],
+        wrapS: wrap("inputs:wrapS"),
+        wrapT: wrap("inputs:wrapT"),
+        colorSpace: space === "raw" || space === "sRGB" ? space : "auto",
+        ...(scale ? { scale } : {}),
+        ...(bias ? { bias } : {}),
+    }
+    // st: a primvar reader's varname, maybe through a UsdTransform2d that scales, turns and moves it first
+    let at = connectionOf(texture.attrs["inputs:st.connect"])
+    for (let depth = 0; at && depth < 8; depth++) {
+        const source = byPath.get(at.prim)
+        if (!source) break
+        const id = unquote(source.attrs["info:id"] ?? "")
+        if (id === "UsdTransform2d") {
+            const two = (name: string, fallback: [number, number]): [number, number] => {
+                const value = numbers(source.attrs[name])
+                return value.length >= 2 ? [value[0], value[1]] : fallback
+            }
+            out.transform = {
+                scale: two("inputs:scale", [1, 1]),
+                rotation: numbers(source.attrs["inputs:rotation"])[0] ?? 0,
+                translation: two("inputs:translation", [0, 0]),
+            }
+            at = connectionOf(source.attrs["inputs:in.connect"])
+        } else if (id.startsWith("UsdPrimvarReader")) {
+            const name = stringInput(source, "inputs:varname", byPath)
+            if (name) out.coordinates = name
+            break
+        } else {
+            // an interface input between them: follow it
+            at = connectionOf(source.attrs[`${at.attribute}.connect`])
+        }
+    }
+    return out
+}
+
+/** `["a", "b"]` or `<a>, <b>` as the paths it names. */
+function targetsOf(value: string | undefined): string[] {
+    return [...(value ?? "").matchAll(/<([^>]+)>/g)].map((match) => match[1])
+}
+
+/** Whether `path` is in the collection at `collection` (`/a/b.collection:name`): includes, excludes, expansion. */
+function inCollection(collection: string, path: string, depth = 0): boolean {
+    const dot = collection.indexOf(".collection:")
+    if (dot === -1 || depth > 8) return false
+    const owner = primsByPath.get(collection.slice(0, dot))
+    if (!owner) return false
+    const prefix = collection.slice(dot + 1)
+    const explicit = unquote(owner.attrs[`${prefix}:expansionRule`] ?? "") === "explicitOnly"
+    const covers = (target: string) =>
+        target.includes(".collection:")
+            ? inCollection(target, path, depth + 1)
+            : path === target || (!explicit && path.startsWith(`${target}/`))
+    const includes = targetsOf(owner.attrs[`${prefix}:includes`])
+    const root = unquote(owner.attrs[`${prefix}:includeRoot`] ?? "")
+    const included = includes.some(covers) || ((root === "1" || root === "true") && !explicit)
+    return included && !targetsOf(owner.attrs[`${prefix}:excludes`]).some(covers)
+}
+
+/** The material a prim binds for `purpose` (`""` all-purpose): its collection bindings first, then its direct one. */
+function bindingAt(at: Prim, geom: string, purpose: string): { material: string; stronger: boolean } | undefined {
+    const strength = (name: string) => unquote(at.attrs[`${name}:bindMaterialAs`] ?? "") === "strongerThanDescendants"
+    const collectionPrefixes = purpose
+        ? [`material:binding:collection:${purpose}:`, `material:binding:${purpose}:collection:`]
+        : ["material:binding:collection:"]
+    for (const [name, value] of Object.entries(at.attrs)) {
+        if (name.endsWith(":bindMaterialAs") || !collectionPrefixes.some((prefix) => name.startsWith(prefix))) continue
+        // an all-purpose collection binding is not a purpose's
+        const rest = name.slice("material:binding:collection:".length)
+        if (!purpose && (rest.startsWith("preview:") || rest.startsWith("full:"))) continue
+        const [collection, material] = targetsOf(value)
+        if (collection && material && inCollection(collection, geom)) return { material, stronger: strength(name) }
+    }
+    const direct = purpose ? `material:binding:${purpose}` : "material:binding"
+    const material = targetsOf(at.attrs[direct])[0]
+    return material ? { material, stronger: strength(direct) } : undefined
+}
+
+/** UsdShade's bound material for a preview renderer: `preview` purpose, else all-purpose; nearest wins unless an ancestor is stronger. */
 function boundSurface(prim: Prim): Surface | undefined {
-    for (let at: Prim | undefined = prim; at; at = at.parent) {
-        const bound = (at.attrs["material:binding"] ?? "").match(/<([^>]+)>/)
-        if (bound) return surfaces.get(bound[1])
+    const geom = pathOf(prim)
+    for (const purpose of ["preview", ""]) {
+        let found: string | undefined
+        for (let at: Prim | undefined = prim; at; at = at.parent) {
+            const binding = bindingAt(at, geom, purpose)
+            if (binding && (!found || binding.stronger)) found = binding.material
+        }
+        if (found) return surfaces.get(found)
     }
     return undefined
 }
 
-/** The primvar a prim's bound material reads its texture's coordinates from, if it names one. */
+/** The primvar a prim's bound material reads its diffuse texture's coordinates from, if it names one. */
 export function textureCoordinates(prim: Prim): string | undefined {
-    return boundSurface(prim)?.coordinates
+    return boundSurface(prim)?.textures.diffuse?.coordinates
+}
+
+/** The primvar a prim's colour is read from per vertex: the one its material's diffuseColor reads, else displayColor. */
+export function colorPrimvar(prim: Prim): string | undefined {
+    const surface = boundSurface(prim)
+    if (surface && (surface.preview || surface.color)) return surface.colorPrimvar
+    return "displayColor"
 }
 
 /** How a geometry draws: its bound material wins over displayColor, as USD has it (displayColor is the no-material fallback). */
 export function surfaceLook(prim: Prim): Partial<DescriptionGeometry> {
-    const surface = boundSurface(prim)
+    const found = boundSurface(prim)
+    // a material only counts when it states a surface this can read
+    const surface = found && (found.preview || found.color) ? found : undefined
     const shown = numbers(prim.attrs["primvars:displayColor"])
-    const opacity = surface?.opacity ?? numbers(prim.attrs["primvars:displayOpacity"])[0] ?? 1
-    const color = surface?.color ?? (shown.length >= 3 ? [shown[0], shown[1], shown[2]] : undefined)
+    const opacity = surface ? (surface.opacity ?? 1) : (numbers(prim.attrs["primvars:displayOpacity"])[0] ?? 1)
+    const fromPrimvar = surface?.colorPrimvar ? numbers(prim.attrs[`primvars:${surface.colorPrimvar}`]) : []
+    const color = surface?.color ??
+        (fromPrimvar.length >= 3 ? fromPrimvar : !surface && shown.length >= 3 ? shown : undefined)
+    const textures = surface?.textures ?? {}
     return {
         ...(color ? { color: [color[0], color[1], color[2], opacity] as [number, number, number, number] } : {}),
-        ...(surface?.texture ? { texture: surface.texture } : {}),
+        ...(!color && opacity < 1 ? { opacity } : {}),
+        ...(textures.diffuse ? { texture: textures.diffuse.file } : {}),
+        ...(Object.keys(textures).length ? { textures } : {}),
         ...(surface?.roughness !== undefined ? { roughness: surface.roughness } : {}),
         ...(surface?.metallic !== undefined ? { metallic: surface.metallic } : {}),
         ...(surface?.ior !== undefined ? { ior: surface.ior } : {}),
+        ...(surface?.emissive ? { emissive: surface.emissive } : {}),
+        ...(surface?.opacityThreshold ? { opacityThreshold: surface.opacityThreshold } : {}),
+        ...(surface?.clearcoat
+            ? { clearcoat: surface.clearcoat, clearcoatRoughness: surface.clearcoatRoughness ?? 0.01 }
+            : {}),
     }
 }
 
@@ -831,14 +1297,16 @@ function meshPathOf(prim: Prim): string | null {
     return assetInfoPath(prim) ?? referenceOf(prim)
 }
 
+/** The file a prim's reference or payload arc names (an arc within the layer is composed instead). */
 function referenceOf(prim: Prim): string | null {
-    const value = prim.meta["references"]
-    if (!value) return null
-    const match = value.match(/@([^@]+)@/)
-    return match ? match[1] : null
+    for (const arc of ["references", "payload"]) {
+        const match = (prim.meta[arc] ?? "").match(/@([^@]+)@/)
+        if (match) return match[1]
+    }
+    return null
 }
 
-const SHAPES = new Set(["Mesh", "Cube", "Sphere", "Cylinder", "Plane"])
+const SHAPES = new Set(["Mesh", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Plane"])
 
 /** A prim that draws something: a gprim, or anything standing for a file of geometry (a reference arc, assetInfo). */
 function isGeometry(prim: Prim): boolean {
@@ -860,6 +1328,7 @@ export function rendered(prim: Prim): boolean {
 function geometryPrims(roots: Prim[], sceneRoot: Prim | null): { prim: Prim; owner: Prim }[] {
     const out: { prim: Prim; owner: Prim }[] = []
     const visit = (prim: Prim, owner: Prim | null): void => {
+        if (!drawnItself(prim)) return
         const here = isLink(prim) || prim === sceneRoot ? prim : owner
         if (prim !== here && isGeometry(prim)) {
             if (here) out.push({ prim, owner: here })
@@ -872,11 +1341,19 @@ function geometryPrims(roots: Prim[], sceneRoot: Prim | null): { prim: Prim; own
     return out
 }
 
-/** The prim's placement relative to `owner`: every transform between them, composed. */
+/** The prim's placement in `owner`'s unscaled frame (where tf puts it): every transform between, the owner's scale included. */
 function placementUnder(prim: Prim, owner: Prim): Placement {
-    const chain: Prim[] = []
-    for (let at: Prim | undefined = prim; at && at !== owner; at = at.parent) chain.unshift(at)
-    return chain.reduce((placed, at) => composePlacement(placed, xformOf(at)), IDENTITY)
+    return decompose(frameMatrix(owner).invert().multiply(worldMatrix(prim)))
+}
+
+/** A link's frame in the stage: its world transform without its scale, which is where tf puts it. */
+function frameMatrix(owner: Prim): THREE.Matrix4 {
+    const { xyz, quat } = decompose(worldMatrix(owner))
+    return new THREE.Matrix4().compose(
+        new THREE.Vector3(...xyz),
+        new THREE.Quaternion(...quat),
+        new THREE.Vector3(1, 1, 1),
+    )
 }
 
 function geometryOf(prim: Prim, owner: Prim): DescriptionGeometry | null {
@@ -885,39 +1362,61 @@ function geometryOf(prim: Prim, owner: Prim): DescriptionGeometry | null {
     const tint = surfaceLook(prim)
     const mesh = meshPathOf(prim)
     const uneven = scale.some((value) => Math.abs(value - 1) > 1e-9)
-    if (prim.type === "Mesh" || mesh) {
-        if (!mesh) return null
-        return { type: "mesh", origin, mesh, ...(uneven ? { scale } : {}), ...tint }
+    const doubleSided = unquote(prim.attrs["doubleSided"] ?? "") === "1" ||
+        unquote(prim.attrs["doubleSided"] ?? "") === "true"
+    const look = { ...tint, ...(doubleSided ? { doubleSided } : {}) }
+    if (mesh) return { type: "mesh", origin, mesh, ...(uneven ? { scale } : {}), ...look }
+    if (prim.type === "Mesh") {
+        // a mesh authored in the layer itself: built from its own points, placed by its origin and scale
+        const geometry = inlineMeshGeometry(prim)
+        return geometry ? { type: "mesh", origin, geometry, ...(uneven ? { scale } : {}), ...look } : null
     }
     // a size left unsaid is UsdGeom's schema default (pxr usdGeom/schema.usda: Cube size 2, radius 1, height 2, Plane 2 x 2)
     if (prim.type === "Cube") {
         // A Cube is a unit cube scaled to the box's extents: USD has no three-sided box.
         const size = numbers(prim.attrs["size"])[0] ?? 2
-        return { type: "box", origin, size: [scale[0] * size, scale[1] * size, scale[2] * size], ...tint }
+        return { type: "box", origin, size: [scale[0] * size, scale[1] * size, scale[2] * size], ...look }
     }
     if (prim.type === "Sphere") {
         const radius = numbers(prim.attrs["radius"])[0] ?? 1
-        return { type: "sphere", origin, radius: radius * scale[0], ...tint }
+        // an unevenly scaled sphere is an ellipsoid: the radius stays and the scale stretches it
+        return uneven && !(Math.abs(scale[0] - scale[1]) < 1e-9 && Math.abs(scale[1] - scale[2]) < 1e-9)
+            ? { type: "sphere", origin, radius, scale, ...look }
+            : { type: "sphere", origin, radius: radius * scale[0], ...look }
     }
-    if (prim.type === "Cylinder") {
-        const radius = numbers(prim.attrs["radius"])[0] ?? 1
-        const height = numbers(prim.attrs["height"])[0] ?? 2
-        return { type: "cylinder", origin, radius: radius * scale[0], length: height * scale[2], ...tint }
+    if (prim.type === "Cylinder" || prim.type === "Capsule" || prim.type === "Cone") {
+        // run along `axis` (Z unless it says otherwise): turned so the shape's own z is that axis
+        const { turn, across } = alongAxis(unquote(prim.attrs["axis"] ?? "Z"), scale)
+        const radius = numbers(prim.attrs["radius"])[0] ?? (prim.type === "Capsule" ? 0.5 : 1)
+        const height = numbers(prim.attrs["height"])[0] ?? (prim.type === "Capsule" ? 1 : 2)
+        const type = prim.type === "Cylinder" ? "cylinder" : prim.type === "Capsule" ? "capsule" : "cone"
+        const placed = { xyz, quat: multiply(quat, turn) }
+        // the axis' scale stretches the length, the other two the radius: equal, they fold into it; not, they stay
+        return Math.abs(across[0] - across[1]) < 1e-9
+            ? { type, origin: placed, radius: radius * across[0], length: height * across[2], ...look }
+            : { type, origin: placed, radius, length: height, scale: across, ...look }
     }
     if (prim.type === "Plane") {
         // A Plane lies across its axis (Z unless it says otherwise): turned so its face is the shape's xy.
-        const axis = unquote(prim.attrs["axis"] ?? "Z")
-        const half = Math.SQRT1_2
-        const turn: [number, number, number, number] = axis === "X"
-            ? [0, half, 0, half]
-            : axis === "Y"
-            ? [-half, 0, 0, half]
-            : [0, 0, 0, 1]
-        const width = (numbers(prim.attrs["width"])[0] ?? 2) * scale[0]
-        const length = (numbers(prim.attrs["length"])[0] ?? 2) * scale[1]
-        return { type: "plane", origin: { xyz, quat: multiply(quat, turn) }, size: [width, length, 0], ...tint }
+        const { turn, across } = alongAxis(unquote(prim.attrs["axis"] ?? "Z"), scale)
+        const width = (numbers(prim.attrs["width"])[0] ?? 2) * across[0]
+        const length = (numbers(prim.attrs["length"])[0] ?? 2) * across[1]
+        return { type: "plane", origin: { xyz, quat: multiply(quat, turn) }, size: [width, length, 0], ...look }
     }
     return null
+}
+
+/** The turn taking a shape's own z onto `axis`, and the prim's scale in the shape's own axes. */
+function alongAxis(axis: string, scale: [number, number, number]): {
+    turn: [number, number, number, number]
+    across: [number, number, number]
+} {
+    const half = Math.SQRT1_2
+    // about y by a quarter: the shape's x, y, z lie along the prim's -z, y, x
+    if (axis === "X") return { turn: [0, half, 0, half], across: [scale[2], scale[1], scale[0]] }
+    // about x by minus a quarter: the shape's x, y, z lie along the prim's x, -z, y
+    if (axis === "Y") return { turn: [-half, 0, 0, half], across: [scale[0], scale[2], scale[1]] }
+    return { turn: [0, 0, 0, 1], across: scale }
 }
 
 /** Every joint: the ones authored as UsdPhysics prims, plus the welds and free joints nesting implies. */
@@ -996,7 +1495,7 @@ function impliedJoint(prim: Prim, ancestor: Prim, name: string): DescriptionJoin
         type: "fixed",
         parent: frameName(ancestor),
         child: name,
-        origin: placementOf(prim),
+        origin: (({ xyz, quat }) => ({ xyz, quat }))(placementUnder(prim, ancestor)),
         axis: [0, 0, 1],
     }
 }
@@ -1130,14 +1629,7 @@ const TONE_MAPS: Record<string, NonNullable<DescriptionLook["toneMap"]>> = {
  * so follow that where it is given, and otherwise take the stage's only one.
  */
 function cameraExposure(roots: Prim[], settings: Prim | undefined): number | undefined {
-    const linked = (settings?.attrs["camera"] ?? "").match(/<([^>]+)>/)?.[1]?.split("/").pop()
-    const cameras: Prim[] = []
-    walk(roots, (prim) => {
-        if (prim.type === "Camera") {
-            cameras.push(prim)
-        }
-    })
-    const camera = cameras.find((prim) => prim.name === linked) ?? cameras[0]
+    const camera = selectedCamera(roots, settings)
     if (camera === undefined) {
         return undefined
     }
@@ -1162,6 +1654,70 @@ function cameraExposure(roots: Prim[], settings: Prim | undefined): number | und
         (aperture * aperture)
 }
 
+/** The camera the render settings point at (`rel camera`), else the stage's only one. */
+function selectedCamera(roots: Prim[], settings: Prim | undefined): Prim | undefined {
+    const linked = targetsOf(settings?.attrs["camera"])[0]
+    const cameras: Prim[] = []
+    walkDrawn(roots, (prim) => {
+        if (prim.type === "Camera") cameras.push(prim)
+    })
+    return cameras.find((prim) => pathOf(prim) === linked) ??
+        cameras.find((prim) => prim.name === linked?.split("/").pop()) ??
+        (cameras.length === 1 ? cameras[0] : undefined)
+}
+
+/** The stage's render settings: a `RenderSettings` prim, or one carrying Omniverse's `omni:rtx:` attributes. */
+function renderSettingsOf(roots: Prim[]): Prim | undefined {
+    let found: Prim | undefined
+    walkDrawn(roots, (prim) => {
+        // Omniverse applies these as API schemas, so an Isaac stage is known by carrying the attributes
+        if (
+            !found && (prim.type === "RenderSettings" || Object.keys(prim.attrs).some((k) => k.startsWith("omni:rtx:")))
+        ) {
+            found = prim
+        }
+    })
+    return found
+}
+
+/** Every Camera prim in world space with its lens as authored (its clipping range in stage units until inMetresZUp). */
+function camerasOf(roots: Prim[], sceneRoot: Prim | null, settings: Prim | undefined): DescriptionCamera[] {
+    const selected = selectedCamera(roots, settings)
+    const out: DescriptionCamera[] = []
+    walkDrawn(roots, (prim) => {
+        if (prim.type !== "Camera") return
+        const value = (name: string, fallback: number) => {
+            const parsed = numbers(prim.attrs[name])[0]
+            return parsed !== undefined && Number.isFinite(parsed) ? parsed : fallback
+        }
+        const clipping = numbers(prim.attrs["clippingRange"])
+        const { xyz, quat } = decompose(worldMatrix(prim))
+        out.push({
+            name: frameName(prim),
+            path: pathOf(prim),
+            xyz,
+            quat,
+            ...onLink(prim, sceneRoot),
+            projection: unquote(prim.attrs["projection"] ?? "") === "orthographic" ? "orthographic" : "perspective",
+            // UsdGeomCamera's schema defaults
+            focalLength: value("focalLength", 50),
+            horizontalAperture: value("horizontalAperture", 20.955),
+            verticalAperture: value("verticalAperture", 15.2908),
+            clippingRange: clipping.length >= 2 ? [clipping[0], clipping[1]] : [1, 1000000],
+            selected: prim === selected,
+        })
+    })
+    return out
+}
+
+/** The link a light or camera moves with (its nearest rigid-body ancestor, or the scene's root frame) and its place on it. */
+function onLink(prim: Prim, sceneRoot: Prim | null): { link?: string; origin?: Origin } {
+    const owner = linkAncestor(prim, sceneRoot)
+    if (!owner) return {}
+    const { xyz, quat } = decompose(frameMatrix(owner).invert().multiply(worldMatrix(prim)))
+    return { link: frameName(owner), origin: { xyz, quat } }
+}
+
 /**
  * The look the layer asks for, from a `RenderSettings` prim.
  *
@@ -1172,17 +1728,7 @@ function cameraExposure(roots: Prim[], settings: Prim | undefined): number | und
  * Everything here is optional. A layer naming none of it, or no RenderSettings prim at all, leaves the
  * viewer's own look alone.
  */
-function lookOf(roots: Prim[]): DescriptionLook | undefined {
-    const matches: Prim[] = []
-    walk(roots, (prim) => {
-        if (matches.length > 0) return
-        // Omniverse hangs these on a prim as applied API schemas rather than giving it a type, so a
-        // stage from Isaac is recognised by carrying the attributes at all.
-        if (prim.type === "RenderSettings" || Object.keys(prim.attrs).some((k) => k.startsWith("omni:rtx:"))) {
-            matches.push(prim)
-        }
-    })
-    const settings = matches[0]
+function lookOf(roots: Prim[], settings: Prim | undefined): DescriptionLook | undefined {
     if (settings === undefined) {
         const exposure = cameraExposure(roots, undefined)
         return exposure === undefined ? undefined : { exposure }
@@ -1224,32 +1770,22 @@ const LIGHT_TYPES: Record<string, DescriptionLight["type"]> = {
     SphereLight: "point",
     DiskLight: "disk",
     RectLight: "rect",
+    CylinderLight: "cylinder",
     DomeLight: "dome",
+    DomeLight_1: "dome",
+    // no PortalLight: it only guides a path tracer's dome sampling, which a rasteriser lighting by the whole dome has no use for
 }
 
-/**
- * Every light the layer carries, in world space.
- *
- * A scene knows how it is lit -- office_555 names a sun and eighteen ceiling fittings -- and a renderer told none
- * of it has to invent some, which in practice is a flat ambient fill leaving every surface the same shade. Reading
- * them lets the layer say instead.
- *
- * World space, because a light is placed by composing the transforms above it and the viewer adds it to the scene
- * rather than to the link it was authored under: a lamp bolted to a moving body is rare, and lighting the common
- * case is worth more than following one around.
- */
-function lightsOf(roots: Prim[]): DescriptionLight[] {
+/** Every light in world space, placed and scaled by every transform above it, with the link it is on (`link`/`origin`). */
+function lightsOf(roots: Prim[], sceneRoot: Prim | null): DescriptionLight[] {
     const found: DescriptionLight[] = []
-    const visit = (prim: Prim, parent: Origin): void => {
-        const here = compose(parent, placementOf(prim))
+    walkDrawn(roots, (prim) => {
         const type = LIGHT_TYPES[prim.type]
-        if (type) {
-            const light = lightOf(prim, type, here)
-            if (light) found.push(light)
-        }
-        for (const child of prim.children) visit(child, here)
-    }
-    for (const root of roots) visit(root, { xyz: [0, 0, 0], quat: [0, 0, 0, 1] })
+        // an invisible light lights nothing (UsdLux lights are imageable)
+        if (!type || !rendered(prim)) return
+        const light = lightOf(prim, type, worldMatrix(prim))
+        if (light) found.push({ ...light, ...onLink(prim, sceneRoot) })
+    })
     return found
 }
 
@@ -1261,9 +1797,13 @@ export const LIGHT_DEFAULTS: Record<string, number> = {
     "inputs:width": 1,
     "inputs:height": 1,
     "inputs:radius": 0.5,
+    "inputs:length": 1,
+    "inputs:colorTemperature": 6500,
+    "inputs:shaping:cone:angle": 90,
+    "inputs:shaping:cone:softness": 0,
 }
 
-function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): DescriptionLight | null {
+function lightOf(prim: Prim, type: DescriptionLight["type"], world: THREE.Matrix4): DescriptionLight | null {
     // the inputs: spelling, else the pre-21.05 one without it
     const raw = (name: string) => prim.attrs[name] ?? prim.attrs[name.replace(/^inputs:/, "")]
     const value = (name: string): number => {
@@ -1277,32 +1817,46 @@ function lightOf(prim: Prim, type: DescriptionLight["type"], world: Origin): Des
     const intensity = value("inputs:intensity")
     if (!(intensity > 0)) return null
     const colour = numbers(raw("inputs:color"))
+    const { xyz, quat, scale } = decompose(world)
     // A light shines down its own -Z; where that points once the transforms above it are applied is its direction.
-    const direction = rotate(world.quat, [0, 0, -1])
+    const direction = rotate(quat, [0, 0, -1])
     const texture = (raw("inputs:texture:file") ?? "").match(/@([^@]+)@/)?.[1]
+    // a light's size is in its own frame, so the transforms above it scale it: x and y for a face, the largest for a radius
+    const sized = Math.max(Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2]))
+    const treatAsPoint = type === "point" && flag("treatAsPoint", false)
+    const cone = value("inputs:shaping:cone:angle")
     return {
         name: frameName(prim),
         type,
-        xyz: world.xyz,
-        quat: world.quat,
+        xyz,
+        quat,
         direction,
         color: colour.length >= 3 ? [colour[0], colour[1], colour[2]] : [1, 1, 1],
         intensity,
         exposure: value("inputs:exposure"),
         normalize: flag("inputs:normalize", false),
         shadow: flag("inputs:shadow:enable", true),
+        ...(flag("inputs:enableColorTemperature", false) ? { colorTemperature: value("inputs:colorTemperature") } : {}),
+        // a cone of 90 degrees or more is the whole hemisphere a face lights anyway: no shaping
+        ...(cone < 90 && type !== "distant" && type !== "dome"
+            ? { cone: { angle: cone, softness: Math.max(0, Math.min(1, value("inputs:shaping:cone:softness"))) } }
+            : {}),
         ...(type === "distant" ? { angle: value("inputs:angle") } : {}),
-        ...(type === "rect" ? { width: value("inputs:width"), height: value("inputs:height") } : {}),
-        ...(type === "disk" || type === "point" ? { radius: value("inputs:radius") } : {}),
+        ...(type === "rect"
+            ? { width: value("inputs:width") * Math.abs(scale[0]), height: value("inputs:height") * Math.abs(scale[1]) }
+            : {}),
+        ...(type === "disk"
+            ? { radius: value("inputs:radius") * Math.max(Math.abs(scale[0]), Math.abs(scale[1])) }
+            : {}),
+        ...(type === "point" ? { radius: treatAsPoint ? 0 : value("inputs:radius") * sized } : {}),
+        ...(type === "cylinder"
+            ? {
+                radius: flag("treatAsLine", false)
+                    ? 0
+                    : value("inputs:radius") * Math.max(Math.abs(scale[1]), Math.abs(scale[2])),
+                length: value("inputs:length") * Math.abs(scale[0]),
+            }
+            : {}),
         ...(texture ? { texture } : {}),
-    }
-}
-
-/** `parent` then `child`, as one place in the world. Scale is not composed: a light has no size to scale. */
-function compose(parent: Origin, child: Origin): Origin {
-    const turned = rotate(parent.quat, child.xyz)
-    return {
-        xyz: [parent.xyz[0] + turned[0], parent.xyz[1] + turned[1], parent.xyz[2] + turned[2]],
-        quat: multiply(parent.quat, child.quat),
     }
 }

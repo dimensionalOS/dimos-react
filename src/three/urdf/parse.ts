@@ -155,7 +155,9 @@ export function meshUris(description: RobotDescription): string[] {
     // the same list: nothing else asks for one, and a shape that names an image it never receives
     // draws untextured for ever.
     const uris = description.links.flatMap((link) => [...link.visuals, ...link.collisions])
-        .flatMap((item) => [item.mesh, item.texture])
+        .flatMap((
+            item,
+        ) => [item.mesh, item.texture, ...Object.values(item.textures ?? {}).map((texture) => texture?.file)])
         .concat((description.lights ?? []).map((light) => light.texture))
         .filter((uri): uri is string => !!uri)
     return [...new Set(uris)]
@@ -178,7 +180,7 @@ export function decodeMeshFile(bytes: Uint8Array): { ts: number; uri: string; da
     }
 }
 
-/** An OBJ or DAE scene's meshes as one geometry: positions, and uvs when every part has them (a map needs them). */
+/** An OBJ or DAE scene's meshes as one geometry: positions, its normals (else smooth ones per part), uvs when every part has them. */
 function mergedMeshes(scene: THREE.Object3D): THREE.BufferGeometry {
     scene.updateMatrixWorld(true)
     const parts: THREE.BufferGeometry[] = []
@@ -193,6 +195,9 @@ function mergedMeshes(scene: THREE.Object3D): THREE.BufferGeometry {
         part.setAttribute("position", mesh.geometry.attributes.position.clone())
         if (withUvs) part.setAttribute("uv", mesh.geometry.attributes.uv.clone())
         part.setIndex(mesh.geometry.index ? mesh.geometry.index.clone() : null)
+        if (mesh.geometry.attributes.normal) part.setAttribute("normal", mesh.geometry.attributes.normal.clone())
+        // indexed and unnormalled: smooth across the vertices the file shares, before they are split apart
+        else part.computeVertexNormals()
         part.applyMatrix4(mesh.matrixWorld)
         parts.push(part.index ? part.toNonIndexed() : part)
     }
@@ -201,7 +206,6 @@ function mergedMeshes(scene: THREE.Object3D): THREE.BufferGeometry {
     }
     const merged = mergeGeometries(parts)
     parts.forEach((part) => part.dispose())
-    merged.computeVertexNormals()
     return merged
 }
 

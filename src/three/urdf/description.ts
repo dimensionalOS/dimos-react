@@ -11,23 +11,69 @@ export interface Origin {
     quat: Q
 }
 
+/** Which UsdPreviewSurface input an image feeds. */
+export type TextureSlot =
+    | "diffuse"
+    | "emissive"
+    | "normal"
+    | "occlusion"
+    | "roughness"
+    | "metallic"
+    | "opacity"
+    | "clearcoat"
+    | "clearcoatRoughness"
+
+/** A UsdUVTexture as a material input reads it: the file, the channel taken, how it wraps and how its st is placed. */
+export interface DescriptionTexture {
+    file: string
+    /** the output the input connects to: `rgb` for a colour, one channel for a scalar */
+    channel: "r" | "g" | "b" | "a" | "rgb" | "rgba"
+    /** UsdUVTexture's wrapS/wrapT (`useMetadata`, its default, is taken as repeat) */
+    wrapS: "repeat" | "mirror" | "clamp" | "black"
+    wrapT: "repeat" | "mirror" | "clamp" | "black"
+    /** `sourceColorSpace`: `auto` is sRGB for an 8-bit image and linear for a float one */
+    colorSpace: "raw" | "sRGB" | "auto"
+    /** `inputs:scale` and `inputs:bias` (rgba): the value read is texel * scale + bias */
+    scale?: [number, number, number, number]
+    bias?: [number, number, number, number]
+    /** the primvar its st comes from (a UsdPrimvarReader_float2's varname), when it names one */
+    coordinates?: string
+    /** a UsdTransform2d between the primvar and the texture: st * scale, turned by rotation (degrees), + translation */
+    transform?: { scale: [number, number]; rotation: number; translation: [number, number] }
+}
+
 export interface DescriptionGeometry {
-    /** `plane`: a flat `size[0]` by `size[1]` face in the origin's xy, facing its +z */
-    type: "mesh" | "box" | "cylinder" | "sphere" | "plane"
+    /** `plane`: a flat `size[0]` by `size[1]` face in the origin's xy, facing its +z; cylinder, capsule and cone run along z */
+    type: "mesh" | "box" | "cylinder" | "sphere" | "plane" | "capsule" | "cone"
     origin: Origin
     mesh?: string
+    /** a mesh authored in the layer itself (a Mesh prim's own points), built in the origin's frame */
+    geometry?: THREE.BufferGeometry
     scale?: V3
     size?: V3
     radius?: number
+    /** a cylinder's or cone's height, or a capsule's between its caps */
     length?: number
     color?: [number, number, number, number]
-    /** an image the bound material names (UsdUVTexture), to be fetched like a mesh file and tiled over this shape */
+    /** how opaque it is, when it names no colour to carry that in */
+    opacity?: number
+    /** an image the bound material names (UsdUVTexture) for its diffuseColor, fetched like a mesh file */
     texture?: string
+    /** every image the bound material reads, by the input it feeds (`diffuse` is `texture`'s) */
+    textures?: Partial<Record<TextureSlot, DescriptionTexture>>
     /** the bound material's UsdPreviewSurface finish, where it states one */
     roughness?: number
     metallic?: number
     /** index of refraction: 1 is no interface at all, so no reflection (UsdPreviewSurface's default is 1.5) */
     ior?: number
+    /** emissiveColor, linear */
+    emissive?: V3
+    /** opacityThreshold: above 0, a cut-out (drawn where opacity reaches it, not blended) */
+    opacityThreshold?: number
+    clearcoat?: number
+    clearcoatRoughness?: number
+    /** UsdGeomGprim's doubleSided: both faces drawn (USD's default is one) */
+    doubleSided?: boolean
 }
 
 export interface DescriptionLink {
@@ -48,10 +94,13 @@ export interface DescriptionLink {
  */
 export interface DescriptionLight {
     name: string
-    /** UsdLux's: DistantLight, SphereLight (`point`), RectLight, DiskLight, DomeLight; `ambient` lights from everywhere */
-    type: "distant" | "point" | "ambient" | "dome" | "rect" | "disk"
+    /** UsdLux's: DistantLight, SphereLight (`point`), RectLight, DiskLight, CylinderLight, DomeLight; `ambient` lights from everywhere */
+    type: "distant" | "point" | "ambient" | "dome" | "rect" | "disk" | "cylinder"
     /** where it is, for a point or area light */
     xyz: V3
+    /** the link it moves with (its nearest rigid-body ancestor, or the scene's root frame) and where it is on that link */
+    link?: string
+    origin?: Origin
     /** how it is turned (x, y, z, w): an area light's face is its xy, shining down its -z */
     quat?: [number, number, number, number]
     /** where it shines, for a distant light */
@@ -69,10 +118,36 @@ export interface DescriptionLight {
     /** a rect light's size, in metres */
     width?: number
     height?: number
-    /** a disk or sphere light's radius, in metres (`inputs:radius`) */
+    /** a disk, sphere or cylinder light's radius, in metres (`inputs:radius`) */
     radius?: number
+    /** a cylinder light's length along its x, in metres */
+    length?: number
     /** a dome's picture of the sky (`inputs:texture:file`), fetched like a mesh file */
     texture?: string
+    /** `inputs:colorTemperature` in kelvin, when `inputs:enableColorTemperature` is on: the colour is tinted by it */
+    colorTemperature?: number
+    /** ShapingAPI's cone: the half-angle (degrees) it is confined to, and how softly it falls off at the edge (0..1) */
+    cone?: { angle: number; softness: number }
+}
+
+/** A Camera prim: where it is, and its lens (UsdGeomCamera, its lengths in the stage's tenths of a unit as USD has them). */
+export interface DescriptionCamera {
+    name: string
+    /** its prim path */
+    path: string
+    xyz: V3
+    quat: Q
+    link?: string
+    origin?: Origin
+    projection: "perspective" | "orthographic"
+    /** mm, as are the apertures (USD's convention: tenths of a scene unit) */
+    focalLength: number
+    horizontalAperture: number
+    verticalAperture: number
+    /** near and far, in metres */
+    clippingRange: [number, number]
+    /** the camera the stage's RenderSettings render through */
+    selected: boolean
 }
 
 /**
@@ -118,6 +193,8 @@ export interface RobotDescription {
     lights?: DescriptionLight[]
     /** how the layer asks to be shown; absent means the viewer's own look stands */
     look?: DescriptionLook
+    /** the stage's cameras, in world space */
+    cameras?: DescriptionCamera[]
 }
 
 const originMatrix = (origin: Origin) =>

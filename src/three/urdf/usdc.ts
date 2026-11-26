@@ -1,10 +1,12 @@
 // A USD crate (.usdc, version 0.4+) read into usda.ts's Prim tree; kinds geometry does not use (dictionaries, time samples) are skipped.
-import type { Prim } from "./usda.ts"
+import type { Prim, StageMetrics } from "./usda.ts"
 
 /** The crate's prims, and the prim its pseudo-root names as default. */
 export interface Crate {
     roots: Prim[]
     defaultPrim: string | null
+    /** the layer's metersPerUnit and upAxis, where it states them */
+    metrics: StageMetrics
 }
 
 /** True for a crate, by its magic rather than its name. */
@@ -328,11 +330,13 @@ class Reader {
         return undefined
     }
 
-    /** A reference's (or payload's) asset path; returns it and how many bytes it took. */
+    /** A reference (or payload) as a text layer writes it (`@asset@`, `</prim>` or both); and how many bytes it took. */
     reference(at: number, payload: boolean): [string, number] {
         const asset = this.strings[this.view.getUint32(at, true)] ?? ""
+        const prim = this.paths[this.view.getUint32(at + 4, true)] ?? ""
+        const text = `${asset ? `@${asset}@` : ""}${prim && prim !== "/" ? `<${prim}>` : ""}`
         // asset, prim path, layer offset, and a reference's custom data (taken as empty: a mesh layer writes none)
-        return [asset, payload ? 4 + 4 + 16 : 4 + 4 + 16 + 8]
+        return [text, payload ? 4 + 4 + 16 : 4 + 4 + 16 + 8]
     }
 
     indexList(at: number, table: string[]): string[] {
@@ -561,6 +565,7 @@ export function parseUsdc(bytes: Uint8Array): Crate {
     const prims = new Map<string, Prim>()
     const order = new Map<string, string[]>()
     let defaultPrim: string | null = null
+    const metrics: StageMetrics = {}
     const properties: [number, string, Record<string, Value | undefined>][] = []
     for (let index = 0; index < specs; index++) {
         const path = reader.paths[specPaths[index]]
@@ -568,6 +573,10 @@ export function parseUsdc(bytes: Uint8Array): Crate {
         const own = fieldsOf(specFieldSets[index])
         if (path === "/") {
             defaultPrim = typeof own.defaultPrim === "string" ? own.defaultPrim : null
+            if (typeof own.metersPerUnit === "number" && own.metersPerUnit > 0) {
+                metrics.metersPerUnit = own.metersPerUnit
+            }
+            if (own.upAxis === "Y" || own.upAxis === "Z") metrics.upAxis = own.upAxis
             order.set("/", tokensOf(own.primChildren))
         } else if (kind === SPEC_PRIM) {
             const name = path.slice(path.lastIndexOf("/") + 1)
@@ -581,8 +590,22 @@ export function parseUsdc(bytes: Uint8Array): Crate {
             }
             const schemas = tokensOf(own.apiSchemas)
             if (schemas.length) prim.meta["apiSchemas"] = `[${schemas.map((schema) => `"${schema}"`).join(", ")}]`
-            const references = own.references as { references: string[] } | undefined
-            if (references?.references?.length) prim.meta["references"] = `@${references.references[0]}@`
+            // SdfSpecifier: 0 def, 1 over, 2 class
+            if (own.specifier === 1) prim.specifier = "over"
+            else if (own.specifier === 2) prim.specifier = "class"
+            for (const arc of ["references", "payload"]) {
+                const listed = own[arc] as { references: string[] } | undefined
+                if (listed?.references?.length) prim.meta[arc] = listed.references.join(", ")
+            }
+            for (const arc of ["inheritPaths", "specializes"]) {
+                const listed = own[arc] as { paths: string[] } | undefined
+                if (listed?.paths?.length) {
+                    prim.meta[arc === "inheritPaths" ? "inherits" : arc] = listed.paths.map((path) => `<${path}>`).join(
+                        ", ",
+                    )
+                }
+            }
+            if (typeof own.active === "boolean" && !own.active) prim.meta["active"] = "false"
             prims.set(path, prim)
             order.set(path, tokensOf(own.primChildren))
         } else if (kind === SPEC_ATTRIBUTE || kind === SPEC_RELATIONSHIP) {
@@ -620,7 +643,7 @@ export function parseUsdc(bytes: Uint8Array): Crate {
         }
     }
     attach("/", roots)
-    return { roots, defaultPrim }
+    return { roots, defaultPrim, metrics }
 }
 
 function tokensOf(value: Value | undefined): string[] {

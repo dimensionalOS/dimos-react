@@ -345,7 +345,8 @@ def Xform "rig"
 test("a surface input the bound shader leaves out comes from its material's own input; the shader's wins", () => {
     const [floor, wall] = parseUsda(_INTERFACE).links[0].visuals
     assertEquals([floor.roughness, floor.metallic, floor.ior], [0.9, 0, 1])
-    assertEquals([wall.roughness, wall.metallic, wall.ior], [0.3, undefined, 1.5])
+    // metallic unsaid anywhere is UsdPreviewSurface's own default, 0
+    assertEquals([wall.roughness, wall.metallic, wall.ior], [0.3, 0, 1.5])
 })
 
 // A room written the way MuJoCo's converter writes one: a plain Xform at the root, a body per thing standing in
