@@ -284,6 +284,70 @@ test("a bound material wins over displayColor, as USD has it", () => {
     assertAlmostEquals(visuals[1].color![0], 0.0331, 1e-6)
 })
 
+// MuJoCo's converter states a material's roughness, metallic and opacity on the Material and binds a preview surface
+// that names only the texture and ior; the material's own inputs are what that surface draws with.
+const _INTERFACE = `#usda 1.0
+(
+    defaultPrim = "rig"
+)
+
+def Xform "rig"
+{
+    def Material "concrete"
+    {
+        float inputs:metallic = 0
+        float inputs:opacity = 1
+        float inputs:roughness = 0.6
+        token outputs:surface.connect = </rig/concrete/preview.outputs:surface>
+
+        def Shader "preview"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:ior = 1
+            float inputs:roughness = 0.9
+            token outputs:surface
+        }
+    }
+
+    def Material "plain"
+    {
+        float inputs:roughness = 0.3
+        token outputs:surface.connect = </rig/plain/preview.outputs:surface>
+
+        def Shader "preview"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            float inputs:ior = 1.5
+            token outputs:surface
+        }
+    }
+
+    def Mesh "floor" (
+        assetInfo = {
+            asset identifier = @meshes/floor.STL@
+        }
+    )
+    {
+        rel material:binding = </rig/concrete>
+    }
+
+    def Mesh "wall" (
+        assetInfo = {
+            asset identifier = @meshes/wall.STL@
+        }
+    )
+    {
+        rel material:binding = </rig/plain>
+    }
+}
+`
+
+test("a surface input the bound shader leaves out comes from its material's own input; the shader's wins", () => {
+    const [floor, wall] = parseUsda(_INTERFACE).links[0].visuals
+    assertEquals([floor.roughness, floor.metallic, floor.ior], [0.9, 0, 1])
+    assertEquals([wall.roughness, wall.metallic, wall.ior], [0.3, undefined, 1.5])
+})
+
 // A room written the way MuJoCo's converter writes one: a plain Xform at the root, a body per thing standing in
 // it, and geoms that are both the collider and the thing you see.
 const room = `#usda 1.0

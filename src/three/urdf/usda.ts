@@ -728,7 +728,8 @@ function surfaceOf(material: Prim, byPath: Map<string, Prim>): Surface {
             "inputs:metallic",
         ], ["ior", "inputs:ior"]] as const
     ) {
-        const value = inputOf(shader, name, byPath)?.value?.[0]
+        // the shader's own input, else the material's interface input of that name (MuJoCo's converter states them there)
+        const value = inputOf(shader, name, byPath)?.value?.[0] ?? numbers(material.attrs[name])[0]
         if (value !== undefined && Number.isFinite(value)) out[key] = value
     }
     return out
