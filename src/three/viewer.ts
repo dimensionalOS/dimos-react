@@ -27,7 +27,7 @@ import { areaRadiance, areaSize, domeIrradiance, domeRadiance, pointIntensity, s
 import { RectAreaLightUniformsLib } from "three/examples/jsm/lights/RectAreaLightUniformsLib.js"
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js"
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js"
-import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js"
+import { AmbientOcclusionPass } from "./ao_pass.ts"
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js"
 
 /** Hill's LTC Fresnel with the material's F90, not three's fixed 1, so an ior-1 surface does not mirror area lights. */
@@ -125,7 +125,7 @@ export class Viewer {
     #sceneLights: THREE.Light[] = []
     #look: DescriptionLook | null = null
     #composer: EffectComposer | null = null
-    #gtao: GTAOPass | null = null
+    #gtao: AmbientOcclusionPass | null = null
     #occlusion = 0
     #occlusionRadius = 0.5
     #environment: THREE.Texture | null = null
@@ -723,16 +723,18 @@ export class Viewer {
             })
             const composer = new EffectComposer(renderer, target)
             composer.addPass(new RenderPass(this.scene, this.camera))
-            const gtao = new GTAOPass(this.scene, this.camera, width, height)
+            const gtao = new AmbientOcclusionPass(this.scene, this.camera, width, height)
             // Nothing in this renderer bounces light, so a crease is lit exactly as brightly as the
             // open floor beside it. This is the half of bounce that can be had cheaply: darken what
             // is enclosed. The radius is in metres of scene, and a desk's underside is the scale that
             // matters here, not a room's corner.
             gtao.updateGtaoMaterial({
                 radius: this.#occlusionRadius,
-                distanceExponent: 1,
+                // samples bunched near the pixel, so a foot on the floor is found, not stepped over
+                distanceExponent: 2,
                 thickness: 1,
-                scale: 1,
+                scale: 1.5,
+                samples: 32,
             })
             gtao.blendIntensity = this.#occlusion
             gtao.enabled = this.#occlusion > 0
