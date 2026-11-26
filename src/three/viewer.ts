@@ -156,7 +156,7 @@ export class Viewer {
     /** lamp shadow maps are drawn again one a frame (the next, how many lag the last change, whether this frame only catches up) */
     #nextCaster = 0
     #staleCasters = 0
-    #catchingUp = false
+    #shadowsCatchingUp = false
     /** the dome a scene's lights name: its turn and how bright its picture is, for the environment it lights by */
     #dome: { rotation: THREE.Euler; intensity: number } | null = null
     /** the camera's own lens, kept while the view looks through a scene's camera */
@@ -804,14 +804,14 @@ export class Viewer {
         }
         if (this.#localCasters.length) {
             // a frame something else asked for means the scene changed: every lamp's map is behind it
-            if (!this.#catchingUp) {
+            if (!this.#shadowsCatchingUp) {
                 this.#staleCasters = this.#localCasters.length
             }
-            this.#catchingUp = false
+            this.#shadowsCatchingUp = false
             if (this.#staleCasters > 0) {
                 this.#localCasters[this.#nextCaster++ % this.#localCasters.length].light.shadow.needsUpdate = true
                 if (--this.#staleCasters > 0) {
-                    this.#catchingUp = true
+                    this.#shadowsCatchingUp = true
                     this.requestRender()
                 }
             }
