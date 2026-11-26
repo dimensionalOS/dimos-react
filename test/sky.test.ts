@@ -19,5 +19,7 @@ test("the sky is the dome's radiance, unclamped, in every texel", () => {
         assertAlmostEquals(data[at + 2], 1.5, 1e-6)
     }
     assertEquals(texture.type, THREE.FloatType)
+    // wide enough for PMREMGenerator to prefilter into an environment (a 2 x 1 strip came out black)
+    assertEquals([texture.image.width, texture.image.height], [64, 32])
     assertEquals(texture.colorSpace, THREE.LinearSRGBColorSpace)
 })

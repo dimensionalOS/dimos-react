@@ -6,9 +6,9 @@ export const SKY_ROTATION_X = Math.PI / 2
 
 /** A uniform sky of this linear radiance, as an HDR texture three tone maps like the rest of the frame. */
 export function skyTexture(radiance: THREE.Color): THREE.DataTexture {
-    // the smallest equirectangular picture, 2:1, so it can also be prefiltered into an environment
-    const width = 2
-    const height = 1
+    // PMREMGenerator prefilters from a cube face width / 4 wide, and its smallest level is 2^4 (its LOD_MIN): any narrower and the environment is black
+    const width = 4 * 2 ** 4
+    const height = width / 2
     const data = new Float32Array(width * height * 4)
     for (let index = 0; index < width * height; index++) {
         data.set([radiance.r, radiance.g, radiance.b, 1], index * 4)

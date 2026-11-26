@@ -153,6 +153,10 @@ export class Viewer {
     #shadowCasters: THREE.DirectionalLight[] = []
     /** the scene's point and spot lights that shadow: their depth range follows the drawn scene too */
     #localCasters: { light: THREE.PointLight | THREE.SpotLight; radius: number }[] = []
+    /** lamp shadow maps are drawn again one a frame (the next, how many lag the last change, whether this frame only catches up) */
+    #nextCaster = 0
+    #staleCasters = 0
+    #catchingUp = false
     /** the dome a scene's lights name: its turn and how bright its picture is, for the environment it lights by */
     #dome: { rotation: THREE.Euler; intensity: number } | null = null
     /** the camera's own lens, kept while the view looks through a scene's camera */
@@ -521,6 +525,8 @@ export class Viewer {
                 made.position.set(...light.xyz)
                 if (shadow && (made instanceof THREE.PointLight || made instanceof THREE.SpotLight)) {
                     made.castShadow = true
+                    // drawn again one lamp a frame (#render), not all of them every frame: each is the whole scene over
+                    made.shadow.autoUpdate = false
                     made.shadow.mapSize.setScalar(this.#localShadowTexels(made))
                     made.shadow.bias = -0.0005
                     this.#localCasters.push({ light: made, radius: light.radius ?? 0 })
@@ -795,6 +801,20 @@ export class Viewer {
         const renderer = this.renderer
         if (!renderer) {
             return
+        }
+        if (this.#localCasters.length) {
+            // a frame something else asked for means the scene changed: every lamp's map is behind it
+            if (!this.#catchingUp) {
+                this.#staleCasters = this.#localCasters.length
+            }
+            this.#catchingUp = false
+            if (this.#staleCasters > 0) {
+                this.#localCasters[this.#nextCaster++ % this.#localCasters.length].light.shadow.needsUpdate = true
+                if (--this.#staleCasters > 0) {
+                    this.#catchingUp = true
+                    this.requestRender()
+                }
+            }
         }
         const agx = this.#look?.toneMap === "agx" && this.#agx !== null
         const composer = this.#occlusion > 0 || agx ? this.#composerFor(renderer) : null
